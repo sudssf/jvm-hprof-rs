@@ -1,11 +1,17 @@
+use crate::AllocSitesFlagsSorting::Live;
 use getset::{CopyGetters, Getters};
 use nom::bytes::complete as bytes;
+use nom::error::ErrorKind;
 use nom::number::complete as number;
 use std::cmp::Ordering;
 use std::fmt::{Error, Formatter};
-use std::{cmp, fmt, hash};
+use std::{cmp, fmt, hash, marker};
 
 mod heap_dump;
+
+trait ParsableWithId: Sized {
+    fn parse(input: &[u8], id_size: IdSize) -> nom::IResult<&[u8], Self>;
+}
 
 #[derive(Copy, Clone, Debug, Eq, Hash, PartialEq)]
 pub struct Id {
@@ -13,20 +19,20 @@ pub struct Id {
     id: u64,
 }
 
-impl Id {
-    fn parse(input: &[u8], size: IdSize) -> nom::IResult<&[u8], Id> {
-        let (input, id) = match size {
+impl fmt::Display for Id {
+    fn fmt(&self, f: &mut Formatter<'_>) -> Result<(), Error> {
+        write!(f, "{}", self.id)
+    }
+}
+
+impl ParsableWithId for Id {
+    fn parse(input: &[u8], id_size: IdSize) -> nom::IResult<&[u8], Self> {
+        let (input, id) = match id_size {
             IdSize::U32 => number::be_u32(input).map(|(i, id)| (i, id as u64))?,
             IdSize::U64 => number::be_u64(input)?,
         };
 
         Ok((input, Id { id }))
-    }
-}
-
-impl fmt::Display for Id {
-    fn fmt(&self, f: &mut Formatter<'_>) -> Result<(), Error> {
-        write!(f, "{}", self.id)
     }
 }
 
@@ -46,15 +52,24 @@ pub struct Hprof<'a> {
 }
 
 impl<'a> Hprof<'a> {
-    pub fn records_iter<'i>(&self) -> RecordIterator<'i>
+    pub fn records_iter<'i>(&self) -> Records<'i>
     where
         'a: 'i,
     {
-        RecordIterator {
+        Records {
             remaining: self.records,
             id_size: self.header.id_size,
         }
     }
+}
+
+pub fn parse_hprof(input: &[u8]) -> ParseResult<Hprof> {
+    let (input, header) = Header::parse(input)?;
+
+    Ok(Hprof {
+        header,
+        records: input,
+    })
 }
 
 #[derive(CopyGetters, Copy, Clone)]
@@ -111,14 +126,14 @@ impl<'a> fmt::Debug for Header<'a> {
     }
 }
 
-pub struct RecordIterator<'a> {
+type ParseResult<'e, T> = Result<T, nom::Err<(&'e [u8], nom::error::ErrorKind)>>;
+
+pub struct Records<'a> {
     remaining: &'a [u8],
     id_size: IdSize,
 }
 
-type ParseResult<'e, T> = Result<T, nom::Err<(&'e [u8], nom::error::ErrorKind)>>;
-
-impl<'a> Iterator for RecordIterator<'a> {
+impl<'a> Iterator for Records<'a> {
     type Item = ParseResult<'a, Record<'a>>;
 
     fn next(&mut self) -> Option<Self::Item> {
@@ -162,6 +177,20 @@ impl<'a> Record<'a> {
         }
     }
 
+    pub fn as_stack_frame(&self) -> Option<ParseResult<StackFrame>> {
+        match self.tag {
+            RecordTag::StackFrame => Some(StackFrame::parse(self.body, self.id_size)),
+            _ => None,
+        }
+    }
+
+    pub fn as_stack_trace(&self) -> Option<ParseResult<StackTrace>> {
+        match self.tag {
+            RecordTag::StackTrace => Some(StackTrace::parse(self.body, self.id_size)),
+            _ => None,
+        }
+    }
+
     fn parse<'i: 'r, 'r>(input: &'i [u8], id_size: IdSize) -> nom::IResult<&'i [u8], Record<'r>> {
         // https://github.com/openjdk/jdk/blob/08822b4e0526fe001c39fe08e241b849eddf481d/src/hotspot/share/services/heapDumper.cpp#L76
         let (input, tag_byte) = bytes::take(1_usize)(input)?;
@@ -171,7 +200,7 @@ impl<'a> Record<'a> {
             0x02 => RecordTag::LoadClass,
             0x03 => RecordTag::UnloadClass,
             0x04 => RecordTag::StackFrame,
-            0x05 => RecordTag::Trace,
+            0x05 => RecordTag::StackTrace,
             0x06 => RecordTag::AllocSites,
             0x07 => RecordTag::HeapSummary,
             0x0A => RecordTag::StartThread,
@@ -206,7 +235,7 @@ pub enum RecordTag {
     LoadClass,
     UnloadClass,
     StackFrame,
-    Trace,
+    StackTrace,
     AllocSites,
     StartThread,
     EndThread,
@@ -225,7 +254,7 @@ impl RecordTag {
             RecordTag::LoadClass => 0x02,
             RecordTag::UnloadClass => 0x03,
             RecordTag::StackFrame => 0x04,
-            RecordTag::Trace => 0x05,
+            RecordTag::StackTrace => 0x05,
             RecordTag::AllocSites => 0x06,
             RecordTag::HeapSummary => 0x07,
             RecordTag::StartThread => 0x0A,
@@ -254,7 +283,7 @@ pub struct Utf8<'a> {
 }
 
 impl<'a> Utf8<'a> {
-    fn parse(input: &[u8], id_size: crate::IdSize) -> ParseResult<Utf8> {
+    fn parse(input: &[u8], id_size: IdSize) -> ParseResult<Utf8> {
         // https://github.com/openjdk/jdk/blob/08822b4e0526fe001c39fe08e241b849eddf481d/src/hotspot/share/services/heapDumper.cpp#L88
         let (input, id) = Id::parse(input, id_size)?;
 
@@ -283,7 +312,7 @@ pub struct LoadClass {
 }
 
 impl LoadClass {
-    fn parse(input: &[u8], id_size: crate::IdSize) -> ParseResult<LoadClass> {
+    fn parse(input: &[u8], id_size: IdSize) -> ParseResult<LoadClass> {
         // https://github.com/openjdk/jdk/blob/08822b4e0526fe001c39fe08e241b849eddf481d/src/hotspot/share/services/heapDumper.cpp#L93
         let (input, class_serial) = number::be_u32(input)?;
         let (input, class_obj_id) = Id::parse(input, id_size)?;
@@ -303,20 +332,80 @@ struct UnloadClass {
     class_serial: u32,
 }
 
-struct StackFrame {
+#[derive(CopyGetters, Clone)]
+pub struct StackFrame {
+    #[get_copy = "pub"]
     id: Id,
+    #[get_copy = "pub"]
     method_name_id: Id,
+    #[get_copy = "pub"]
     method_signature_id: Id,
+    #[get_copy = "pub"]
     source_file_name_id: Id,
+    #[get_copy = "pub"]
     class_serial: u32,
+    #[get_copy = "pub"]
     line_num: LineNum,
 }
 
-struct Trace {
+impl StackFrame {
+    fn parse(input: &[u8], id_size: IdSize) -> ParseResult<Self> {
+        // https://github.com/openjdk/jdk/blob/08822b4e0526fe001c39fe08e241b849eddf481d/src/hotspot/share/services/heapDumper.cpp#L104
+        let (input, id) = Id::parse(input, id_size)?;
+        let (input, method_name_id) = Id::parse(input, id_size)?;
+        let (input, method_signature_id) = Id::parse(input, id_size)?;
+        let (input, source_file_name_id) = Id::parse(input, id_size)?;
+        let (input, class_serial) = number::be_u32(input)?;
+        let (input, line_num) = LineNum::parse(input)?;
+
+        Ok(StackFrame {
+            id,
+            method_name_id,
+            method_signature_id,
+            source_file_name_id,
+            class_serial,
+            line_num,
+        })
+    }
+}
+
+#[derive(CopyGetters, Clone)]
+pub struct StackTrace<'a> {
+    id_size: IdSize,
+    #[get_copy = "pub"]
     stack_trace_serial: u32,
+    #[get_copy = "pub"]
     thread_serial: u32,
-    // num_frames: u32,
-    // TODO iterator over following stack frame ids
+    num_frame_ids: u32,
+    frame_ids: &'a [u8],
+}
+
+impl<'a> StackTrace<'a> {
+    fn parse(input: &[u8], id_size: crate::IdSize) -> ParseResult<StackTrace> {
+        // https://github.com/openjdk/jdk/blob/08822b4e0526fe001c39fe08e241b849eddf481d/src/hotspot/share/services/heapDumper.cpp#L116
+        let (input, stack_trace_serial) = number::be_u32(input)?;
+        let (input, thread_serial) = number::be_u32(input)?;
+        let (input, num_frame_ids) = number::be_u32(input)?;
+
+        Ok(StackTrace {
+            id_size,
+            stack_trace_serial,
+            thread_serial,
+            num_frame_ids,
+            frame_ids: input,
+        })
+    }
+
+    pub fn frame_ids(&self) -> Ids {
+        Ids {
+            iter: ParsingIteratorWithId {
+                id_size: self.id_size,
+                num_remaining: self.num_frame_ids,
+                remaining: self.frame_ids,
+                phantom: marker::PhantomData,
+            },
+        }
+    }
 }
 
 /// Heap allocation sites, obtained after GC
@@ -365,11 +454,40 @@ struct ControlSettings {
 }
 
 #[derive(Copy, Clone, Debug)]
-enum LineNum {
+pub enum LineNum {
     Normal(u32),
     Unknown,
     CompiledMethod,
     NativeMethod,
+}
+
+impl LineNum {
+    fn parse(input: &[u8]) -> nom::IResult<&[u8], Self> {
+        // https://github.com/openjdk/jdk/blob/08822b4e0526fe001c39fe08e241b849eddf481d/src/hotspot/share/services/heapDumper.cpp#L111
+        let (input, num) = number::be_i32(input)?;
+
+        Ok((
+            input,
+            match num {
+                num if num > 0 => LineNum::Normal(num as u32),
+                -1 => LineNum::Unknown,
+                -2 => LineNum::CompiledMethod,
+                -3 => LineNum::NativeMethod,
+                _ => panic!("Invalid line num {}", num), // TODO
+            },
+        ))
+    }
+}
+
+impl fmt::Display for LineNum {
+    fn fmt(&self, f: &mut Formatter<'_>) -> Result<(), Error> {
+        match self {
+            LineNum::Normal(n) => write!(f, "{}", n),
+            LineNum::Unknown => write!(f, "Unknown"),
+            LineNum::CompiledMethod => write!(f, "CompiledMethod"),
+            LineNum::NativeMethod => write!(f, "NativeMethod"),
+        }
+    }
 }
 
 #[derive(Copy, Clone, Debug)]
@@ -453,13 +571,45 @@ struct AllocSite {
     num_instances_allocated: u32,
 }
 
-pub fn parse_hprof(input: &[u8]) -> ParseResult<Hprof> {
-    let (input, header) = Header::parse(input)?;
+pub struct Ids<'a> {
+    iter: ParsingIteratorWithId<'a, Id>,
+}
 
-    Ok(Hprof {
-        header,
-        records: input,
-    })
+impl<'a> Iterator for Ids<'a> {
+    type Item = ParseResult<'a, Id>;
+
+    fn next(&mut self) -> Option<Self::Item> {
+        self.iter.next()
+    }
+}
+
+/// Common "iterate over n things that need id size" pattern
+struct ParsingIteratorWithId<'a, P: ParsableWithId> {
+    id_size: IdSize,
+    num_remaining: u32,
+    remaining: &'a [u8],
+    phantom: marker::PhantomData<P>,
+}
+
+impl<'a, P: ParsableWithId> Iterator for ParsingIteratorWithId<'a, P> {
+    type Item = ParseResult<'a, P>;
+
+    fn next(&mut self) -> Option<Self::Item> {
+        if self.num_remaining == 0 {
+            return None;
+        }
+
+        let res = P::parse(self.remaining, self.id_size);
+
+        match res {
+            Ok((input, id)) => {
+                self.remaining = input;
+                self.num_remaining -= 1;
+                Some(Ok(id))
+            }
+            Err(e) => Some(Err(e)),
+        }
+    }
 }
 
 #[cfg(test)]

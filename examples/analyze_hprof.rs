@@ -4,7 +4,7 @@ use chrono::offset::TimeZone;
 use clap;
 use itertools::Itertools;
 
-use jvm_hprof::{Hprof, RecordTag};
+use jvm_hprof::{Hprof, Id, RecordTag, Utf8};
 use memmap;
 use std::{collections, fs};
 
@@ -20,7 +20,8 @@ fn main() {
         .subcommand(clap::SubCommand::with_name("header"))
         .subcommand(clap::SubCommand::with_name("tag-counts"))
         .subcommand(clap::SubCommand::with_name("dump-utf8"))
-        .subcommand(clap::SubCommand::with_name("dump-load-class"));
+        .subcommand(clap::SubCommand::with_name("dump-load-class"))
+        .subcommand(clap::SubCommand::with_name("dump-stack-trace"));
     let matches = app.get_matches();
 
     let file_path = matches.value_of("file").expect("file must be specified");
@@ -36,6 +37,7 @@ fn main() {
         ("tag-counts", _) => tag_counts(&hprof),
         ("dump-utf8", _) => dump_utf8(&hprof),
         ("dump-load-class", _) => dump_load_class(&hprof),
+        ("dump-stack-trace", _) => dump_stack_trace(&hprof),
         _ => panic!("Unknown subcommand"),
     };
 }
@@ -87,13 +89,7 @@ fn dump_utf8(hprof: &Hprof) {
 }
 
 fn dump_load_class(hprof: &Hprof) {
-    let utf8 = hprof
-        .records_iter()
-        .map(|r| r.unwrap())
-        .filter(|r| r.tag() == jvm_hprof::RecordTag::Utf8)
-        .map(|r| r.as_utf_8().unwrap().unwrap())
-        .map(|u| (u.name_id(), u))
-        .collect::<collections::HashMap<_, _>>();
+    let utf8 = utf8_by_id(hprof);
 
     hprof
         .records_iter()
@@ -107,10 +103,75 @@ fn dump_load_class(hprof: &Hprof) {
             println!(
                 "Class name id: {} -> {}",
                 l.class_name_id(),
-                utf8.get(&l.class_name_id())
-                    .map(|u| u.text_as_str().unwrap_or("(invalid utf8)"))
-                    .unwrap_or("(not found)")
+                get_utf8_if_available(&utf8, l.class_name_id())
             );
             println!();
         })
+}
+
+fn dump_stack_trace(hprof: &Hprof) {
+    let utf8 = utf8_by_id(hprof);
+
+    let frames = hprof
+        .records_iter()
+        .map(|r| r.unwrap())
+        .filter(|r| r.tag() == jvm_hprof::RecordTag::StackFrame)
+        .map(|r| r.as_stack_frame().unwrap().unwrap())
+        .map(|f| (f.id(), f))
+        .collect::<collections::HashMap<_, _>>();
+
+    let load_classes_by_serial = hprof
+        .records_iter()
+        .map(|r| r.unwrap())
+        .filter(|r| r.tag() == jvm_hprof::RecordTag::LoadClass)
+        .map(|r| r.as_load_class().unwrap().unwrap())
+        .map(|f| (f.class_serial(), f))
+        .collect::<collections::HashMap<_, _>>();
+
+    hprof
+        .records_iter()
+        .map(|r| r.unwrap())
+        .filter(|r| r.tag() == RecordTag::StackTrace)
+        .for_each(|r| {
+            let t = r.as_stack_trace().unwrap().unwrap();
+            println!("Trace serial: {}", t.stack_trace_serial());
+            println!("Thread serial: {}", t.thread_serial());
+
+            for id in t.frame_ids().map(|r| r.unwrap()) {
+                print!("{}\t", id);
+
+                match frames.get(&id) {
+                    None => println!("(no frame found)"),
+                    Some(f) => println!(
+                        "{}:{}\n\t↪ {}#{}({})",
+                        get_utf8_if_available(&utf8, f.source_file_name_id()),
+                        f.line_num(),
+                        load_classes_by_serial
+                            .get(&f.class_serial())
+                            .map(|lc| get_utf8_if_available(&utf8, lc.class_name_id()))
+                            .unwrap_or("(class not found)"),
+                        get_utf8_if_available(&utf8, f.method_name_id()),
+                        get_utf8_if_available(&utf8, f.method_signature_id())
+                    ),
+                }
+            }
+
+            println!();
+        })
+}
+
+fn utf8_by_id<'a>(hprof: &'a Hprof) -> collections::HashMap<Id, Utf8<'a>> {
+    hprof
+        .records_iter()
+        .map(|r| r.unwrap())
+        .filter(|r| r.tag() == jvm_hprof::RecordTag::Utf8)
+        .map(|r| r.as_utf_8().unwrap().unwrap())
+        .map(|u| (u.name_id(), u))
+        .collect::<collections::HashMap<_, _>>()
+}
+
+fn get_utf8_if_available<'a>(utf8: &'a collections::HashMap<Id, Utf8<'a>>, id: Id) -> &'a str {
+    utf8.get(&id)
+        .map(|u| u.text_as_str().unwrap_or("(invalid utf8)"))
+        .unwrap_or("(utf8 not found)")
 }
