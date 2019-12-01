@@ -1,0 +1,1 @@
+A parser for the [`hprof`](https://github.com/openjdk/jdk/blob/08822b4e0526fe001c39fe08e241b849eddf481d/src/hotspot/share/services/heapDumper.cpp) file format. This is used to capture heap dumps from the JVM.
