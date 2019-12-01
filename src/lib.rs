@@ -3,11 +3,11 @@ use nom::bytes::complete as bytes;
 use nom::number::complete as number;
 use std::cmp::Ordering;
 use std::fmt::{Error, Formatter};
-use std::{cmp, fmt};
+use std::{cmp, fmt, hash};
 
 mod heap_dump;
 
-#[derive(Copy, Clone, Debug, Eq, PartialEq)]
+#[derive(Copy, Clone, Debug, Eq, Hash, PartialEq)]
 pub struct Id {
     // inflate 4-byte ids to 8-byte since if we have a small 32-bit heap, no worries about memory anyway
     id: u64,
@@ -155,6 +155,13 @@ impl<'a> Record<'a> {
         }
     }
 
+    pub fn as_load_class(&self) -> Option<ParseResult<LoadClass>> {
+        match self.tag {
+            RecordTag::LoadClass => Some(LoadClass::parse(self.body, self.id_size)),
+            _ => None,
+        }
+    }
+
     fn parse<'i: 'r, 'r>(input: &'i [u8], id_size: IdSize) -> nom::IResult<&'i [u8], Record<'r>> {
         // https://github.com/openjdk/jdk/blob/08822b4e0526fe001c39fe08e241b849eddf481d/src/hotspot/share/services/heapDumper.cpp#L76
         let (input, tag_byte) = bytes::take(1_usize)(input)?;
@@ -238,7 +245,7 @@ impl cmp::Ord for RecordTag {
     }
 }
 
-#[derive(CopyGetters, Getters, Copy, Clone)]
+#[derive(CopyGetters, Copy, Clone)]
 pub struct Utf8<'a> {
     #[get_copy = "pub"]
     name_id: Id,
@@ -263,11 +270,33 @@ impl<'a> Utf8<'a> {
     }
 }
 
-struct LoadClass {
+#[derive(CopyGetters, Copy, Clone)]
+pub struct LoadClass {
+    #[get_copy = "pub"]
     class_serial: u32,
+    #[get_copy = "pub"]
     class_obj_id: Id,
+    #[get_copy = "pub"]
     stack_trace_serial: u32,
+    #[get_copy = "pub"]
     class_name_id: Id,
+}
+
+impl LoadClass {
+    fn parse(input: &[u8], id_size: crate::IdSize) -> ParseResult<LoadClass> {
+        // https://github.com/openjdk/jdk/blob/08822b4e0526fe001c39fe08e241b849eddf481d/src/hotspot/share/services/heapDumper.cpp#L93
+        let (input, class_serial) = number::be_u32(input)?;
+        let (input, class_obj_id) = Id::parse(input, id_size)?;
+        let (input, stack_trace_serial) = number::be_u32(input)?;
+        let (input, class_name_id) = Id::parse(input, id_size)?;
+
+        Ok(LoadClass {
+            class_serial,
+            class_obj_id,
+            stack_trace_serial,
+            class_name_id,
+        })
+    }
 }
 
 struct UnloadClass {

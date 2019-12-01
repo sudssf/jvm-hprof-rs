@@ -6,7 +6,7 @@ use itertools::Itertools;
 
 use jvm_hprof::{Hprof, RecordTag};
 use memmap;
-use std::fs;
+use std::{collections, fs};
 
 fn main() {
     let app = clap::App::new("Analyze hprof")
@@ -19,7 +19,8 @@ fn main() {
         )
         .subcommand(clap::SubCommand::with_name("header"))
         .subcommand(clap::SubCommand::with_name("tag-counts"))
-        .subcommand(clap::SubCommand::with_name("dump-utf8"));
+        .subcommand(clap::SubCommand::with_name("dump-utf8"))
+        .subcommand(clap::SubCommand::with_name("dump-load-class"));
     let matches = app.get_matches();
 
     let file_path = matches.value_of("file").expect("file must be specified");
@@ -34,6 +35,7 @@ fn main() {
         ("header", _) => header(&hprof),
         ("tag-counts", _) => tag_counts(&hprof),
         ("dump-utf8", _) => dump_utf8(&hprof),
+        ("dump-load-class", _) => dump_load_class(&hprof),
         _ => panic!("Unknown subcommand"),
     };
 }
@@ -82,4 +84,33 @@ fn dump_utf8(hprof: &Hprof) {
                 );
             }
         });
+}
+
+fn dump_load_class(hprof: &Hprof) {
+    let utf8 = hprof
+        .records_iter()
+        .map(|r| r.unwrap())
+        .filter(|r| r.tag() == jvm_hprof::RecordTag::Utf8)
+        .map(|r| r.as_utf_8().unwrap().unwrap())
+        .map(|u| (u.name_id(), u))
+        .collect::<collections::HashMap<_, _>>();
+
+    hprof
+        .records_iter()
+        .map(|r| r.unwrap())
+        .filter(|r| r.tag() == RecordTag::LoadClass)
+        .map(|r| r.as_load_class().unwrap().unwrap())
+        .for_each(|l| {
+            println!("Class serial: {}", l.class_serial());
+            println!("Class obj id: {}", l.class_obj_id());
+            println!("Stack trace serial: {}", l.stack_trace_serial());
+            println!(
+                "Class name id: {} -> {}",
+                l.class_name_id(),
+                utf8.get(&l.class_name_id())
+                    .map(|u| u.text_as_str().unwrap_or("(invalid utf8)"))
+                    .unwrap_or("(not found)")
+            );
+            println!();
+        })
 }
