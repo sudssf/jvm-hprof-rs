@@ -599,7 +599,7 @@ impl ParsableWithId for FieldDescriptor {
         let (input, type_byte) = number::be_u8(input)?;
 
         let field_type = match type_byte {
-            0x02 => FieldType::Boolean,
+            0x02 => FieldType::Object,
             0x04 => FieldType::Boolean,
             0x05 => FieldType::Char,
             0x06 => FieldType::Float,
