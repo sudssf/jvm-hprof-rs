@@ -1,21 +1,20 @@
-use crate::AllocSitesFlagsSorting::Live;
-use getset::{CopyGetters, Getters};
+use getset::CopyGetters;
 use nom::bytes::complete as bytes;
-use nom::error::ErrorKind;
 use nom::number::complete as number;
 use std::cmp::Ordering;
 use std::fmt::{Error, Formatter};
-use std::{cmp, fmt, hash, marker};
+use std::{cmp, fmt, marker};
 
-mod heap_dump;
+pub mod heap_dump;
 
 trait ParsableWithId: Sized {
     fn parse(input: &[u8], id_size: IdSize) -> nom::IResult<&[u8], Self>;
 }
 
-#[derive(Copy, Clone, Debug, Eq, Hash, PartialEq)]
+#[derive(CopyGetters, Copy, Clone, Debug, Eq, Hash, PartialEq)]
 pub struct Id {
     // inflate 4-byte ids to 8-byte since if we have a small 32-bit heap, no worries about memory anyway
+    #[get_copy = "pub"]
     id: u64,
 }
 
@@ -24,6 +23,14 @@ impl fmt::Display for Id {
         write!(f, "{}", self.id)
     }
 }
+
+impl fmt::UpperHex for Id {
+    fn fmt(&self, f: &mut Formatter<'_>) -> Result<(), Error> {
+        fmt::UpperHex::fmt(&self.id, f)
+    }
+}
+
+pub type Serial = u32;
 
 impl ParsableWithId for Id {
     fn parse(input: &[u8], id_size: IdSize) -> nom::IResult<&[u8], Self> {
@@ -40,6 +47,15 @@ impl ParsableWithId for Id {
 pub enum IdSize {
     U32,
     U64,
+}
+
+impl IdSize {
+    fn size_in_bytes(&self) -> usize {
+        match self {
+            IdSize::U32 => 4,
+            IdSize::U64 => 8,
+        }
+    }
 }
 
 // https://github.com/openjdk/jdk/blob/08822b4e0526fe001c39fe08e241b849eddf481d/src/hotspot/share/services/heapDumper.cpp
@@ -191,6 +207,15 @@ impl<'a> Record<'a> {
         }
     }
 
+    pub fn as_heap_dump_segment(&self) -> Option<ParseResult<HeapDumpSegment>> {
+        match self.tag {
+            RecordTag::HeapDump | RecordTag::HeapDumpSegment => {
+                Some(HeapDumpSegment::parse(self.body, self.id_size))
+            }
+            _ => None,
+        }
+    }
+
     fn parse<'i: 'r, 'r>(input: &'i [u8], id_size: IdSize) -> nom::IResult<&'i [u8], Record<'r>> {
         // https://github.com/openjdk/jdk/blob/08822b4e0526fe001c39fe08e241b849eddf481d/src/hotspot/share/services/heapDumper.cpp#L76
         let (input, tag_byte) = bytes::take(1_usize)(input)?;
@@ -210,7 +235,7 @@ impl<'a> Record<'a> {
             0x0E => RecordTag::ControlSettings,
             0x1C => RecordTag::HeapDumpSegment,
             0x2C => RecordTag::HeapDumpEnd,
-            _ => panic!("unexpected tag"),
+            _ => panic!("unexpected tag"), // TODO
         };
 
         let (input, micros) = number::be_u32(input)?;
@@ -302,11 +327,11 @@ impl<'a> Utf8<'a> {
 #[derive(CopyGetters, Copy, Clone)]
 pub struct LoadClass {
     #[get_copy = "pub"]
-    class_serial: u32,
+    class_serial: Serial,
     #[get_copy = "pub"]
     class_obj_id: Id,
     #[get_copy = "pub"]
-    stack_trace_serial: u32,
+    stack_trace_serial: Serial,
     #[get_copy = "pub"]
     class_name_id: Id,
 }
@@ -329,7 +354,7 @@ impl LoadClass {
 }
 
 struct UnloadClass {
-    class_serial: u32,
+    class_serial: Serial,
 }
 
 #[derive(CopyGetters, Clone)]
@@ -343,7 +368,7 @@ pub struct StackFrame {
     #[get_copy = "pub"]
     source_file_name_id: Id,
     #[get_copy = "pub"]
-    class_serial: u32,
+    class_serial: Serial,
     #[get_copy = "pub"]
     line_num: LineNum,
 }
@@ -354,6 +379,7 @@ impl StackFrame {
         let (input, id) = Id::parse(input, id_size)?;
         let (input, method_name_id) = Id::parse(input, id_size)?;
         let (input, method_signature_id) = Id::parse(input, id_size)?;
+        // TODO Option?
         let (input, source_file_name_id) = Id::parse(input, id_size)?;
         let (input, class_serial) = number::be_u32(input)?;
         let (input, line_num) = LineNum::parse(input)?;
@@ -373,9 +399,9 @@ impl StackFrame {
 pub struct StackTrace<'a> {
     id_size: IdSize,
     #[get_copy = "pub"]
-    stack_trace_serial: u32,
+    stack_trace_serial: Serial,
     #[get_copy = "pub"]
-    thread_serial: u32,
+    thread_serial: Serial,
     num_frame_ids: u32,
     frame_ids: &'a [u8],
 }
@@ -421,16 +447,16 @@ struct AllocSites {
 }
 
 struct StartThread {
-    thread_serial: u32,
+    thread_serial: Serial,
     thread_id: Id,
-    stack_trace_serial: u32,
+    stack_trace_serial: Serial,
     thread_name_id: Id,
     thread_group_name_id: Id,
     thread_group_parent_name_id: Id,
 }
 
 struct EndThread {
-    thread_serial: u32,
+    thread_serial: Serial,
 }
 
 struct HeapSummary {
@@ -438,8 +464,49 @@ struct HeapSummary {
 }
 
 /// Represents either a HPROF_HEAP_DUMP or HPROF_HEAP_DUMP_SEGMENT
-struct HeapDump {
-    // TODO iterator over heap dump sub records
+pub struct HeapDumpSegment<'a> {
+    id_size: IdSize,
+    records: &'a [u8],
+}
+
+impl<'a> HeapDumpSegment<'a> {
+    fn parse(input: &[u8], id_size: IdSize) -> ParseResult<HeapDumpSegment> {
+        Ok(HeapDumpSegment {
+            id_size,
+            records: input,
+        })
+    }
+
+    pub fn sub_records(&self) -> SubRecords {
+        SubRecords {
+            id_size: self.id_size,
+            remaining: self.records,
+        }
+    }
+}
+
+pub struct SubRecords<'a> {
+    id_size: IdSize,
+    remaining: &'a [u8],
+}
+
+impl<'a> Iterator for SubRecords<'a> {
+    type Item = ParseResult<'a, heap_dump::SubRecord<'a>>;
+
+    fn next(&mut self) -> Option<Self::Item> {
+        if self.remaining.is_empty() {
+            return None;
+        }
+
+        let res = heap_dump::SubRecord::parse(self.remaining, self.id_size);
+        match res {
+            Ok((input, record)) => {
+                self.remaining = input;
+                Some(Ok(record))
+            }
+            Err(e) => Some(Err(e)),
+        }
+    }
 }
 
 struct CpuSamples {
@@ -563,8 +630,8 @@ impl ObjOrArrayType {
 struct AllocSite {
     is_array: ObjOrArrayType,
     /// May be zero during startup
-    class_serial: u32,
-    stack_trace_serial: u32,
+    class_serial: Serial,
+    stack_trace_serial: Serial,
     num_bytes_alive: u32,
     num_instances_alive: u32,
     num_bytes_allocated: u32,
@@ -596,6 +663,7 @@ impl<'a, P: ParsableWithId> Iterator for ParsingIteratorWithId<'a, P> {
 
     fn next(&mut self) -> Option<Self::Item> {
         if self.num_remaining == 0 {
+            debug_assert_eq!(0, self.remaining.len());
             return None;
         }
 

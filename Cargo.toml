@@ -17,6 +17,7 @@ chrono = "0.4.10"
 itertools = "0.8.2"
 base64 = "0.11.0"
 clap = "2.33.0"
+escaper = "0.1.0"
 
 [[example]]
 name = "analyze_hprof"
