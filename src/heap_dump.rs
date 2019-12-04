@@ -322,14 +322,22 @@ pub struct Class<'a> {
     protection_domain_obj_id: Option<Id>,
     #[get_copy = "pub"]
     instance_size_bytes: u32,
-    static_fields: Vec<FieldEntry>,
+    num_static_fields: u16,
+    static_fields: &'a [u8],
     num_instance_fields: u16,
     instance_fields: &'a [u8],
 }
 
 impl<'a> Class<'a> {
-    pub fn static_fields(&self) -> &[FieldEntry] {
-        self.static_fields.as_slice()
+    pub fn static_fields(&self) -> FieldEntries {
+        FieldEntries {
+            iter: ParsingIteratorWithId {
+                id_size: self.id_size,
+                num_remaining: self.num_static_fields as u32,
+                remaining: self.static_fields,
+                phantom: marker::PhantomData,
+            },
+        }
     }
 
     pub fn instance_fields(&self) -> FieldDescriptors {
@@ -362,38 +370,25 @@ impl<'a> Class<'a> {
         // TODO parse failure
         assert_eq!(0, constant_pool_len);
 
-        let (input, static_fields_len) = number::be_u16(input)?;
+        let (input, num_static_fields) = number::be_u16(input)?;
 
         // since we get a _number of fields_ not a length in bytes, we have to parse now :(
         // Fortunately, the number of classes << number of objects, so we only will have to do this
         // tens of thousands of times, not billions.
-        let mut static_fields = Vec::with_capacity(static_fields_len as usize);
+        // To save memory, we parse now to get the length, then just keep a slice and parse on
+        // demand later.
 
+        let input_before_static_fields = input;
         // need to keep track of input outside the loop scope
         let mut input_after_static_fields = input;
-        for _ in 0..static_fields_len {
-            let (input, name_id) = Id::parse(input_after_static_fields, id_size)?;
-            let (input, tag) = number::be_u8(input)?;
-
-            // dump_field_value https://github.com/openjdk/jdk/blob/08822b4e0526fe001c39fe08e241b849eddf481d/src/hotspot/share/services/heapDumper.cpp#L769
-            // tags https://github.com/openjdk/jdk/blob/08822b4e0526fe001c39fe08e241b849eddf481d/src/hotspot/share/services/heapDumper.cpp#L709
-            let (input, value) = match tag {
-                0x01 | 0x02 => {
-                    Id::parse(input, id_size).map(|(input, id)| (input, FieldValue::ObjectId(id)))
-                }
-                0x04 => number::be_u8(input).map(|(input, b)| (input, FieldValue::Boolean(b != 0))),
-                0x05 => number::be_u16(input).map(|(input, c)| (input, FieldValue::Char(c))),
-                0x06 => number::be_f32(input).map(|(input, f)| (input, FieldValue::Float(f))),
-                0x07 => number::be_f64(input).map(|(input, f)| (input, FieldValue::Double(f))),
-                0x08 => number::be_i8(input).map(|(input, b)| (input, FieldValue::Byte(b))),
-                0x09 => number::be_i16(input).map(|(input, s)| (input, FieldValue::Short(s))),
-                0x0A => number::be_i32(input).map(|(input, i)| (input, FieldValue::Int(i))),
-                0x0B => number::be_i64(input).map(|(input, l)| (input, FieldValue::Long(l))),
-                _ => panic!("Unexpected field value type {:#X}", tag), // TODO
-            }?;
-            static_fields.push(FieldEntry { name_id, value });
+        for _ in 0..num_static_fields {
+            let (input, _) = FieldEntry::parse(input_after_static_fields, id_size)?;
             input_after_static_fields = input;
         }
+
+        let static_fields_byte_len =
+            input_before_static_fields.len() - input_after_static_fields.len();
+        let (input, static_fields) = bytes::take(static_fields_byte_len)(input)?;
 
         // instance field descriptors https://github.com/openjdk/jdk/blob/08822b4e0526fe001c39fe08e241b849eddf481d/src/hotspot/share/services/heapDumper.cpp#L964
         let (input, num_instance_fields) = number::be_u16(input_after_static_fields)?;
@@ -414,11 +409,24 @@ impl<'a> Class<'a> {
                 signers_obj_id,
                 protection_domain_obj_id,
                 instance_size_bytes,
+                num_static_fields,
                 static_fields,
                 num_instance_fields,
                 instance_fields,
             },
         ))
+    }
+}
+
+pub struct FieldEntries<'a> {
+    iter: ParsingIteratorWithId<'a, FieldEntry>,
+}
+
+impl<'a> Iterator for FieldEntries<'a> {
+    type Item = ParseResult<'a, FieldEntry>;
+
+    fn next(&mut self) -> Option<Self::Item> {
+        self.iter.next()
     }
 }
 
@@ -570,6 +578,32 @@ pub struct FieldEntry {
     name_id: Id,
     #[get_copy = "pub"]
     value: FieldValue,
+}
+
+impl ParsableWithId for FieldEntry {
+    fn parse(input: &[u8], id_size: IdSize) -> nom::IResult<&[u8], Self> {
+        let (input, name_id) = Id::parse(input, id_size)?;
+        let (input, tag) = number::be_u8(input)?;
+
+        // dump_field_value https://github.com/openjdk/jdk/blob/08822b4e0526fe001c39fe08e241b849eddf481d/src/hotspot/share/services/heapDumper.cpp#L769
+        // tags https://github.com/openjdk/jdk/blob/08822b4e0526fe001c39fe08e241b849eddf481d/src/hotspot/share/services/heapDumper.cpp#L709
+        let (input, value) = match tag {
+            0x01 | 0x02 => {
+                Id::parse(input, id_size).map(|(input, id)| (input, FieldValue::ObjectId(id)))
+            }
+            0x04 => number::be_u8(input).map(|(input, b)| (input, FieldValue::Boolean(b != 0))),
+            0x05 => number::be_u16(input).map(|(input, c)| (input, FieldValue::Char(c))),
+            0x06 => number::be_f32(input).map(|(input, f)| (input, FieldValue::Float(f))),
+            0x07 => number::be_f64(input).map(|(input, f)| (input, FieldValue::Double(f))),
+            0x08 => number::be_i8(input).map(|(input, b)| (input, FieldValue::Byte(b))),
+            0x09 => number::be_i16(input).map(|(input, s)| (input, FieldValue::Short(s))),
+            0x0A => number::be_i32(input).map(|(input, i)| (input, FieldValue::Int(i))),
+            0x0B => number::be_i64(input).map(|(input, l)| (input, FieldValue::Long(l))),
+            _ => panic!("Unexpected field value type {:#X}", tag), // TODO
+        }?;
+
+        Ok((input, FieldEntry { name_id, value }))
+    }
 }
 
 #[derive(Clone, Copy, Debug)]

@@ -220,9 +220,10 @@ fn class_hierarchy_dot(hprof: &Hprof, output: &path::Path) {
                         )
                         .unwrap();
 
-                        if !class.static_fields().is_empty() {
+                        if class.static_fields().count() > 0 {
                             writeln!(dot, "<TR><TD COLSPAN=\"2\">Static fields</TD></TR>").unwrap();
-                            for sf in class.static_fields() {
+                            for pr in class.static_fields() {
+                                let sf = pr.unwrap();
                                 writeln!(
                                     dot,
                                     "<TR><TD>{}</TD><TD>{}</TD></TR>",
@@ -319,10 +320,11 @@ fn dump_classes(hprof: &Hprof) {
                         );
                         println!("Instance size: {}", class.instance_size_bytes());
 
-                        if !class.static_fields().is_empty() {
+                        if class.static_fields().count() > 0 {
                             println!("Static fields:");
 
-                            for sf in class.static_fields() {
+                            for pr in class.static_fields() {
+                                let sf = pr.unwrap();
                                 println!(
                                     "\t{:#018X} ({}): {:?}",
                                     sf.name_id(),
@@ -334,7 +336,7 @@ fn dump_classes(hprof: &Hprof) {
                             }
                         }
 
-                        if class.instance_fields().count() > 1 {
+                        if class.instance_fields().count() > 0 {
                             println!("Instance fields:");
 
                             for ifd_result in class.instance_fields() {
