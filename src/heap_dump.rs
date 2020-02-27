@@ -1,15 +1,23 @@
-use getset::CopyGetters;
+use getset::{CopyGetters, Getters};
 
 use crate::*;
 
+mod primitive_array;
+
+pub use primitive_array::PrimitiveArray;
+pub use primitive_array::PrimitiveArrayType;
+
 pub enum SubRecord<'a> {
+    /// Doesn't seem to ever be written, but it's documented as existing
     GcRootUnknown(GcRootUnknown),
     GcRootThreadObj(GcRootThreadObj),
     GcRootJniGlobal(GcRootJniGlobal),
     GcRootJniLocalRef(GcRootJniLocalRef),
     GcRootJavaStackFrame(GcRootJavaStackFrame),
+    /// Doesn't seem to ever be written, but it's documented as existing
     GcRootNativeStack(GcRootNativeStack),
     GcRootSystemClass(GcRootSystemClass),
+    /// Doesn't seem to ever be written, but it's documented as existing
     GcRootThreadBlock(GcRootThreadBlock),
     GcRootBusyMonitor(GcRootBusyMonitor),
     Class(Class<'a>),
@@ -311,10 +319,8 @@ pub struct Class<'a> {
     stack_trace_serial: Serial,
     #[get_copy = "pub"]
     super_class_obj_id: Option<Id>,
-    // TODO optional
     #[get_copy = "pub"]
     class_loader_obj_id: Option<Id>,
-    // TODO optional
     #[get_copy = "pub"]
     signers_obj_id: Option<Id>,
     // TODO optional
@@ -329,10 +335,13 @@ pub struct Class<'a> {
 }
 
 impl<'a> Class<'a> {
-    pub fn static_fields(&self) -> FieldEntries {
-        FieldEntries {
-            iter: ParsingIteratorWithId {
-                id_size: self.id_size,
+    pub fn static_fields(&self) -> StaticFieldEntries {
+        StaticFieldEntries {
+            iter: ParsingIterator {
+                parser: IdSizeParserWrapper {
+                    id_size: self.id_size,
+                    phantom: marker::PhantomData,
+                },
                 num_remaining: self.num_static_fields as u32,
                 remaining: self.static_fields,
                 phantom: marker::PhantomData,
@@ -340,10 +349,13 @@ impl<'a> Class<'a> {
         }
     }
 
-    pub fn instance_fields(&self) -> FieldDescriptors {
+    pub fn instance_field_descriptors(&self) -> FieldDescriptors {
         FieldDescriptors {
-            iter: ParsingIteratorWithId {
-                id_size: self.id_size,
+            iter: ParsingIterator {
+                parser: IdSizeParserWrapper {
+                    id_size: self.id_size,
+                    phantom: marker::PhantomData,
+                },
                 num_remaining: self.num_instance_fields as u32,
                 remaining: self.instance_fields,
                 phantom: marker::PhantomData,
@@ -382,7 +394,7 @@ impl<'a> Class<'a> {
         // need to keep track of input outside the loop scope
         let mut input_after_static_fields = input;
         for _ in 0..num_static_fields {
-            let (input, _) = FieldEntry::parse(input_after_static_fields, id_size)?;
+            let (input, _) = StaticFieldEntry::parse(input_after_static_fields, id_size)?;
             input_after_static_fields = input;
         }
 
@@ -418,12 +430,12 @@ impl<'a> Class<'a> {
     }
 }
 
-pub struct FieldEntries<'a> {
-    iter: ParsingIteratorWithId<'a, FieldEntry>,
+pub struct StaticFieldEntries<'a> {
+    iter: ParsingIterator<'a, StaticFieldEntry, IdSizeParserWrapper<StaticFieldEntry>>,
 }
 
-impl<'a> Iterator for FieldEntries<'a> {
-    type Item = ParseResult<'a, FieldEntry>;
+impl<'a> Iterator for StaticFieldEntries<'a> {
+    type Item = ParseResult<'a, StaticFieldEntry>;
 
     fn next(&mut self) -> Option<Self::Item> {
         self.iter.next()
@@ -431,7 +443,7 @@ impl<'a> Iterator for FieldEntries<'a> {
 }
 
 pub struct FieldDescriptors<'a> {
-    iter: ParsingIteratorWithId<'a, FieldDescriptor>,
+    iter: ParsingIterator<'a, FieldDescriptor, IdSizeParserWrapper<FieldDescriptor>>,
 }
 
 impl<'a> Iterator for FieldDescriptors<'a> {
@@ -442,7 +454,7 @@ impl<'a> Iterator for FieldDescriptors<'a> {
     }
 }
 
-#[derive(CopyGetters)]
+#[derive(CopyGetters, Getters)]
 pub struct Instance<'a> {
     #[get_copy = "pub"]
     obj_id: Id,
@@ -450,6 +462,7 @@ pub struct Instance<'a> {
     stack_trace_serial: Serial,
     #[get_copy = "pub"]
     class_obj_id: Id,
+    #[get = "pub"]
     fields: &'a [u8],
 }
 
@@ -481,7 +494,8 @@ pub struct ObjectArray<'a> {
     #[get_copy = "pub"]
     stack_trace_serial: Serial,
     #[get_copy = "pub"]
-    array_class_id: Id,
+    array_class_obj_id: Id,
+    num_elements: u32,
     contents: &'a [u8],
 }
 
@@ -505,110 +519,52 @@ impl<'a> ObjectArray<'a> {
             ObjectArray {
                 obj_id,
                 stack_trace_serial,
-                array_class_id,
+                array_class_obj_id: array_class_id,
+                num_elements,
                 contents,
             },
         ))
     }
-}
 
-#[derive(CopyGetters)]
-pub struct PrimitiveArray<'a> {
-    #[get_copy = "pub"]
-    obj_id: Id,
-    #[get_copy = "pub"]
-    stack_trace_serial: Serial,
-    array_type: PrimitiveArrayType,
-    contents: &'a [u8], // TODO iterate over primitives
-}
-
-impl<'a> PrimitiveArray<'a> {
-    fn parse<'i: 'r, 'r>(
-        input: &'i [u8],
-        id_size: IdSize,
-    ) -> nom::IResult<&'i [u8], PrimitiveArray<'r>> {
-        // https://github.com/openjdk/jdk/blob/08822b4e0526fe001c39fe08e241b849eddf481d/src/hotspot/share/services/heapDumper.cpp#L279
-        let (input, obj_id) = Id::parse(input, id_size)?;
-        let (input, stack_trace_serial) = number::be_u32(input)?;
-        let (input, num_elements) = number::be_u32(input)?;
-        let (input, type_byte) = number::be_u8(input)?;
-
-        let (array_type, size) = match type_byte {
-            0x04 => (PrimitiveArrayType::Boolean, 1),
-            0x05 => (PrimitiveArrayType::Char, 2),
-            0x06 => (PrimitiveArrayType::Float, 4),
-            0x07 => (PrimitiveArrayType::Double, 8),
-            0x08 => (PrimitiveArrayType::Byte, 1),
-            0x09 => (PrimitiveArrayType::Short, 2),
-            0x0A => (PrimitiveArrayType::Int, 4),
-            0x0B => (PrimitiveArrayType::Long, 8),
-            _ => panic!("Unexpected primitive array type {:#X}", type_byte), // TODO
-        };
-
-        let (input, contents) = bytes::take(num_elements * size)(input)?;
-
-        Ok((
-            input,
-            PrimitiveArray {
-                obj_id,
-                stack_trace_serial,
-                array_type,
-                contents,
+    pub fn elements(&self, id_size: IdSize) -> NullableIds {
+        NullableIds {
+            iter: ParsingIterator {
+                parser: IdSizeParserWrapper {
+                    id_size,
+                    phantom: marker::PhantomData,
+                },
+                num_remaining: self.num_elements,
+                remaining: self.contents,
+                phantom: marker::PhantomData,
             },
-        ))
+        }
     }
-}
-
-enum PrimitiveArrayType {
-    Boolean,
-    Char,
-    Float,
-    Double,
-    Byte,
-    Short,
-    Int,
-    Long,
 }
 
 enum ConstantPoolEntry {}
 
 #[derive(CopyGetters, Clone, Copy, Debug)]
-pub struct FieldEntry {
+pub struct StaticFieldEntry {
     #[get_copy = "pub"]
     name_id: Id,
     #[get_copy = "pub"]
     value: FieldValue,
 }
 
-impl ParsableWithId for FieldEntry {
+impl StatelessParserWithId for StaticFieldEntry {
     fn parse(input: &[u8], id_size: IdSize) -> nom::IResult<&[u8], Self> {
         let (input, name_id) = Id::parse(input, id_size)?;
-        let (input, tag) = number::be_u8(input)?;
 
-        // dump_field_value https://github.com/openjdk/jdk/blob/08822b4e0526fe001c39fe08e241b849eddf481d/src/hotspot/share/services/heapDumper.cpp#L769
-        // tags https://github.com/openjdk/jdk/blob/08822b4e0526fe001c39fe08e241b849eddf481d/src/hotspot/share/services/heapDumper.cpp#L709
-        let (input, value) = match tag {
-            0x01 | 0x02 => {
-                Id::parse(input, id_size).map(|(input, id)| (input, FieldValue::ObjectId(id)))
-            }
-            0x04 => number::be_u8(input).map(|(input, b)| (input, FieldValue::Boolean(b != 0))),
-            0x05 => number::be_u16(input).map(|(input, c)| (input, FieldValue::Char(c))),
-            0x06 => number::be_f32(input).map(|(input, f)| (input, FieldValue::Float(f))),
-            0x07 => number::be_f64(input).map(|(input, f)| (input, FieldValue::Double(f))),
-            0x08 => number::be_i8(input).map(|(input, b)| (input, FieldValue::Byte(b))),
-            0x09 => number::be_i16(input).map(|(input, s)| (input, FieldValue::Short(s))),
-            0x0A => number::be_i32(input).map(|(input, i)| (input, FieldValue::Int(i))),
-            0x0B => number::be_i64(input).map(|(input, l)| (input, FieldValue::Long(l))),
-            _ => panic!("Unexpected field value type {:#X}", tag), // TODO
-        }?;
+        let (input, field_type) = FieldType::parse(input)?;
+        let (input, value) = field_type.parse_value(input, id_size)?;
 
-        Ok((input, FieldEntry { name_id, value }))
+        Ok((input, StaticFieldEntry { name_id, value }))
     }
 }
 
 #[derive(Clone, Copy, Debug)]
 pub enum FieldValue {
-    ObjectId(Id),
+    ObjectId(Option<Id>),
     Boolean(bool),
     Char(u16),
     Float(f32),
@@ -627,23 +583,11 @@ pub struct FieldDescriptor {
     field_type: FieldType,
 }
 
-impl ParsableWithId for FieldDescriptor {
+impl StatelessParserWithId for FieldDescriptor {
     fn parse(input: &[u8], id_size: IdSize) -> nom::IResult<&[u8], Self> {
         let (input, name_id) = Id::parse(input, id_size)?;
-        let (input, type_byte) = number::be_u8(input)?;
 
-        let field_type = match type_byte {
-            0x02 => FieldType::Object,
-            0x04 => FieldType::Boolean,
-            0x05 => FieldType::Char,
-            0x06 => FieldType::Float,
-            0x07 => FieldType::Double,
-            0x08 => FieldType::Byte,
-            0x09 => FieldType::Short,
-            0x0A => FieldType::Int,
-            0x0B => FieldType::Long,
-            _ => panic!("Unexpected field type {:#X}", type_byte), // TODO
-        };
+        let (input, field_type) = FieldType::parse(input)?;
 
         Ok((
             input,
@@ -657,7 +601,7 @@ impl ParsableWithId for FieldDescriptor {
 
 #[derive(Clone, Copy, Debug)]
 pub enum FieldType {
-    Object,
+    ObjectId,
     Boolean,
     Char,
     Float,
@@ -666,6 +610,66 @@ pub enum FieldType {
     Short,
     Int,
     Long,
+}
+
+impl FieldType {
+    fn parse(input: &[u8]) -> nom::IResult<&[u8], Self> {
+        let (input, type_byte) = number::be_u8(input)?;
+
+        // tags https://github.com/openjdk/jdk/blob/08822b4e0526fe001c39fe08e241b849eddf481d/src/hotspot/share/services/heapDumper.cpp#L709
+        let field_type = match type_byte {
+            // 0x01 is HPROF_ARRAY_OBJECT, which seems to never be used
+            0x02 => FieldType::ObjectId,
+            0x04 => FieldType::Boolean,
+            0x05 => FieldType::Char,
+            0x06 => FieldType::Float,
+            0x07 => FieldType::Double,
+            0x08 => FieldType::Byte,
+            0x09 => FieldType::Short,
+            0x0A => FieldType::Int,
+            0x0B => FieldType::Long,
+            _ => panic!("Unexpected field type {:#X}", type_byte),
+        };
+
+        Ok((input, field_type))
+    }
+
+    /// Returns the corresponding `FieldValue` variant
+    pub fn parse_value<'a>(
+        &self,
+        input: &'a [u8],
+        id_size: IdSize,
+    ) -> nom::IResult<&'a [u8], FieldValue> {
+        // dump_field_value https://github.com/openjdk/jdk/blob/08822b4e0526fe001c39fe08e241b849eddf481d/src/hotspot/share/services/heapDumper.cpp#L769
+        match self {
+            FieldType::ObjectId => parse_optional_id(input, id_size)
+                .map(|(input, id)| (input, FieldValue::ObjectId(id))),
+            FieldType::Boolean => {
+                bool::parse(input).map(|(input, b)| (input, FieldValue::Boolean(b)))
+            }
+            FieldType::Char => u16::parse(input).map(|(input, c)| (input, FieldValue::Char(c))),
+            FieldType::Float => f32::parse(input).map(|(input, f)| (input, FieldValue::Float(f))),
+            FieldType::Double => f64::parse(input).map(|(input, f)| (input, FieldValue::Double(f))),
+            FieldType::Byte => i8::parse(input).map(|(input, b)| (input, FieldValue::Byte(b))),
+            FieldType::Short => i16::parse(input).map(|(input, s)| (input, FieldValue::Short(s))),
+            FieldType::Int => i32::parse(input).map(|(input, i)| (input, FieldValue::Int(i))),
+            FieldType::Long => i64::parse(input).map(|(input, l)| (input, FieldValue::Long(l))),
+        }
+    }
+
+    pub fn java_type_name(&self) -> &'static str {
+        match self {
+            FieldType::ObjectId => "Object",
+            FieldType::Boolean => "boolean",
+            FieldType::Char => "char",
+            FieldType::Float => "float",
+            FieldType::Double => "double",
+            FieldType::Byte => "byte",
+            FieldType::Short => "short",
+            FieldType::Int => "int",
+            FieldType::Long => "long",
+        }
+    }
 }
 
 fn parse_optional_id(input: &[u8], id_size: IdSize) -> nom::IResult<&[u8], Option<Id>> {
@@ -686,4 +690,22 @@ fn parse_optional_serial(input: &[u8]) -> nom::IResult<&[u8], Option<Serial>> {
             (input, Some(index))
         }
     })
+}
+
+pub struct NullableIds<'a> {
+    iter: ParsingIterator<'a, Option<Id>, IdSizeParserWrapper<Option<Id>>>,
+}
+
+impl<'a> Iterator for NullableIds<'a> {
+    type Item = ParseResult<'a, Option<Id>>;
+
+    fn next(&mut self) -> Option<Self::Item> {
+        self.iter.next()
+    }
+}
+
+impl StatelessParserWithId for Option<Id> {
+    fn parse(input: &[u8], id_size: IdSize) -> nom::IResult<&[u8], Self> {
+        parse_optional_id(input, id_size)
+    }
 }

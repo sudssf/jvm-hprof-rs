@@ -7,10 +7,6 @@ use std::{cmp, fmt, marker};
 
 pub mod heap_dump;
 
-trait ParsableWithId: Sized {
-    fn parse(input: &[u8], id_size: IdSize) -> nom::IResult<&[u8], Self>;
-}
-
 #[derive(CopyGetters, Copy, Clone, Debug, Eq, Hash, PartialEq)]
 pub struct Id {
     // inflate 4-byte ids to 8-byte since if we have a small 32-bit heap, no worries about memory anyway
@@ -32,7 +28,7 @@ impl fmt::UpperHex for Id {
 
 pub type Serial = u32;
 
-impl ParsableWithId for Id {
+impl StatelessParserWithId for Id {
     fn parse(input: &[u8], id_size: IdSize) -> nom::IResult<&[u8], Self> {
         let (input, id) = match id_size {
             IdSize::U32 => number::be_u32(input).map(|(i, id)| (i, id as u64))?,
@@ -141,8 +137,6 @@ impl<'a> fmt::Debug for Header<'a> {
             .finish()
     }
 }
-
-type ParseResult<'e, T> = Result<T, nom::Err<(&'e [u8], nom::error::ErrorKind)>>;
 
 pub struct Records<'a> {
     remaining: &'a [u8],
@@ -424,8 +418,11 @@ impl<'a> StackTrace<'a> {
 
     pub fn frame_ids(&self) -> Ids {
         Ids {
-            iter: ParsingIteratorWithId {
-                id_size: self.id_size,
+            iter: ParsingIterator {
+                parser: IdSizeParserWrapper {
+                    id_size: self.id_size,
+                    phantom: marker::PhantomData,
+                },
                 num_remaining: self.num_frame_ids,
                 remaining: self.frame_ids,
                 phantom: marker::PhantomData,
@@ -639,7 +636,7 @@ struct AllocSite {
 }
 
 pub struct Ids<'a> {
-    iter: ParsingIteratorWithId<'a, Id>,
+    iter: ParsingIterator<'a, Id, IdSizeParserWrapper<Id>>,
 }
 
 impl<'a> Iterator for Ids<'a> {
@@ -650,16 +647,18 @@ impl<'a> Iterator for Ids<'a> {
     }
 }
 
+type ParseResult<'e, T> = Result<T, nom::Err<(&'e [u8], nom::error::ErrorKind)>>;
+
 /// Common "iterate over n things that need id size" pattern
-struct ParsingIteratorWithId<'a, P: ParsableWithId> {
-    id_size: IdSize,
+struct ParsingIterator<'a, T, P: Parser<T>> {
+    parser: P,
     num_remaining: u32,
     remaining: &'a [u8],
-    phantom: marker::PhantomData<P>,
+    phantom: marker::PhantomData<T>,
 }
 
-impl<'a, P: ParsableWithId> Iterator for ParsingIteratorWithId<'a, P> {
-    type Item = ParseResult<'a, P>;
+impl<'a, T, P: Parser<T>> Iterator for ParsingIterator<'a, T, P> {
+    type Item = ParseResult<'a, T>;
 
     fn next(&mut self) -> Option<Self::Item> {
         if self.num_remaining == 0 {
@@ -667,16 +666,53 @@ impl<'a, P: ParsableWithId> Iterator for ParsingIteratorWithId<'a, P> {
             return None;
         }
 
-        let res = P::parse(self.remaining, self.id_size);
+        let res = self.parser.parse(self.remaining);
 
         match res {
-            Ok((input, id)) => {
+            Ok((input, val)) => {
                 self.remaining = input;
                 self.num_remaining -= 1;
-                Some(Ok(id))
+                Some(Ok(val))
             }
             Err(e) => Some(Err(e)),
         }
+    }
+}
+
+/// A parser that needs state (id size, primitive type, etc)
+trait Parser<T>: Sized {
+    fn parse<'a>(&self, input: &'a [u8]) -> nom::IResult<&'a [u8], T>;
+}
+
+/// Convenience for simpler types to avoid needing a separate struct
+trait StatelessParser: Sized {
+    fn parse(input: &[u8]) -> nom::IResult<&[u8], Self>;
+}
+
+/// A shortcut for the common case of deserializing something that needs id size
+trait StatelessParserWithId: Sized {
+    fn parse(input: &[u8], id_size: IdSize) -> nom::IResult<&[u8], Self>;
+}
+
+/// Adapt StatelessParserWithId into a Parser
+struct IdSizeParserWrapper<P: StatelessParserWithId> {
+    id_size: IdSize,
+    phantom: marker::PhantomData<P>,
+}
+
+impl<P: StatelessParserWithId> Parser<P> for IdSizeParserWrapper<P> {
+    fn parse<'a>(&self, input: &'a [u8]) -> nom::IResult<&'a [u8], P> {
+        P::parse(input, self.id_size)
+    }
+}
+
+struct StatelessParserWrapper<P: StatelessParser> {
+    phantom: marker::PhantomData<P>,
+}
+
+impl<P: StatelessParser> Parser<P> for StatelessParserWrapper<P> {
+    fn parse<'a>(&self, input: &'a [u8]) -> nom::IResult<&'a [u8], P> {
+        P::parse(input)
     }
 }
 
