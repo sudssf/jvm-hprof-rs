@@ -337,29 +337,21 @@ pub struct Class<'a> {
 impl<'a> Class<'a> {
     pub fn static_fields(&self) -> StaticFieldEntries {
         StaticFieldEntries {
-            iter: ParsingIterator {
-                parser: IdSizeParserWrapper {
-                    id_size: self.id_size,
-                    phantom: marker::PhantomData,
-                },
-                num_remaining: self.num_static_fields as u32,
-                remaining: self.static_fields,
-                phantom: marker::PhantomData,
-            },
+            iter: ParsingIterator::new_stateless_id_size(
+                self.id_size,
+                self.static_fields,
+                self.num_static_fields as u32,
+            ),
         }
     }
 
     pub fn instance_field_descriptors(&self) -> FieldDescriptors {
         FieldDescriptors {
-            iter: ParsingIterator {
-                parser: IdSizeParserWrapper {
-                    id_size: self.id_size,
-                    phantom: marker::PhantomData,
-                },
-                num_remaining: self.num_instance_fields as u32,
-                remaining: self.instance_fields,
-                phantom: marker::PhantomData,
-            },
+            iter: ParsingIterator::new_stateless_id_size(
+                self.id_size,
+                self.instance_fields,
+                self.num_instance_fields as u32,
+            ),
         }
     }
 
@@ -400,7 +392,7 @@ impl<'a> Class<'a> {
 
         let static_fields_byte_len =
             input_before_static_fields.len() - input_after_static_fields.len();
-        let (input, static_fields) = bytes::take(static_fields_byte_len)(input)?;
+        let (_input, static_fields) = bytes::take(static_fields_byte_len)(input)?;
 
         // instance field descriptors https://github.com/openjdk/jdk/blob/08822b4e0526fe001c39fe08e241b849eddf481d/src/hotspot/share/services/heapDumper.cpp#L964
         let (input, num_instance_fields) = number::be_u16(input_after_static_fields)?;
@@ -528,15 +520,7 @@ impl<'a> ObjectArray<'a> {
 
     pub fn elements(&self, id_size: IdSize) -> NullableIds {
         NullableIds {
-            iter: ParsingIterator {
-                parser: IdSizeParserWrapper {
-                    id_size,
-                    phantom: marker::PhantomData,
-                },
-                num_remaining: self.num_elements,
-                remaining: self.contents,
-                phantom: marker::PhantomData,
-            },
+            iter: ParsingIterator::new_stateless_id_size(id_size, self.contents, self.num_elements),
         }
     }
 }

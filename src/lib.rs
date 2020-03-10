@@ -3,9 +3,11 @@ use nom::bytes::complete as bytes;
 use nom::number::complete as number;
 use std::cmp::Ordering;
 use std::fmt::{Error, Formatter};
-use std::{cmp, fmt, marker};
+use std::{cmp, fmt};
 
 pub mod heap_dump;
+mod parsing_iterator;
+use parsing_iterator::*;
 
 #[derive(CopyGetters, Copy, Clone, Debug, Eq, Hash, PartialEq)]
 pub struct Id {
@@ -418,15 +420,11 @@ impl<'a> StackTrace<'a> {
 
     pub fn frame_ids(&self) -> Ids {
         Ids {
-            iter: ParsingIterator {
-                parser: IdSizeParserWrapper {
-                    id_size: self.id_size,
-                    phantom: marker::PhantomData,
-                },
-                num_remaining: self.num_frame_ids,
-                remaining: self.frame_ids,
-                phantom: marker::PhantomData,
-            },
+            iter: ParsingIterator::new_stateless_id_size(
+                self.id_size,
+                self.frame_ids,
+                self.num_frame_ids,
+            ),
         }
     }
 }
@@ -648,78 +646,3 @@ impl<'a> Iterator for Ids<'a> {
 }
 
 type ParseResult<'e, T> = Result<T, nom::Err<(&'e [u8], nom::error::ErrorKind)>>;
-
-/// Common "iterate over n things that need id size" pattern
-struct ParsingIterator<'a, T, P: Parser<T>> {
-    parser: P,
-    num_remaining: u32,
-    remaining: &'a [u8],
-    phantom: marker::PhantomData<T>,
-}
-
-impl<'a, T, P: Parser<T>> Iterator for ParsingIterator<'a, T, P> {
-    type Item = ParseResult<'a, T>;
-
-    fn next(&mut self) -> Option<Self::Item> {
-        if self.num_remaining == 0 {
-            debug_assert_eq!(0, self.remaining.len());
-            return None;
-        }
-
-        let res = self.parser.parse(self.remaining);
-
-        match res {
-            Ok((input, val)) => {
-                self.remaining = input;
-                self.num_remaining -= 1;
-                Some(Ok(val))
-            }
-            Err(e) => Some(Err(e)),
-        }
-    }
-}
-
-/// A parser that needs state (id size, primitive type, etc)
-trait Parser<T>: Sized {
-    fn parse<'a>(&self, input: &'a [u8]) -> nom::IResult<&'a [u8], T>;
-}
-
-/// Convenience for simpler types to avoid needing a separate struct
-trait StatelessParser: Sized {
-    fn parse(input: &[u8]) -> nom::IResult<&[u8], Self>;
-}
-
-/// A shortcut for the common case of deserializing something that needs id size
-trait StatelessParserWithId: Sized {
-    fn parse(input: &[u8], id_size: IdSize) -> nom::IResult<&[u8], Self>;
-}
-
-/// Adapt StatelessParserWithId into a Parser
-struct IdSizeParserWrapper<P: StatelessParserWithId> {
-    id_size: IdSize,
-    phantom: marker::PhantomData<P>,
-}
-
-impl<P: StatelessParserWithId> Parser<P> for IdSizeParserWrapper<P> {
-    fn parse<'a>(&self, input: &'a [u8]) -> nom::IResult<&'a [u8], P> {
-        P::parse(input, self.id_size)
-    }
-}
-
-struct StatelessParserWrapper<P: StatelessParser> {
-    phantom: marker::PhantomData<P>,
-}
-
-impl<P: StatelessParser> Parser<P> for StatelessParserWrapper<P> {
-    fn parse<'a>(&self, input: &'a [u8]) -> nom::IResult<&'a [u8], P> {
-        P::parse(input)
-    }
-}
-
-#[cfg(test)]
-mod tests {
-    #[test]
-    fn it_works() {
-        assert_eq!(2 + 2, 4);
-    }
-}

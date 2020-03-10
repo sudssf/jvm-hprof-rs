@@ -18,14 +18,7 @@ macro_rules! iterator_method {
         pub fn $method_name(&self) -> Option<$iter_struct> {
             match self.primitive_type {
                 PrimitiveArrayType::$type_variant => Some($iter_struct {
-                    iter: ParsingIterator {
-                        parser: StatelessParserWrapper {
-                            phantom: marker::PhantomData,
-                        },
-                        num_remaining: self.num_elements,
-                        remaining: self.contents,
-                        phantom: marker::PhantomData,
-                    },
+                    iter: ParsingIterator::new_stateless(self.contents, self.num_elements),
                 }),
                 _ => None,
             }
