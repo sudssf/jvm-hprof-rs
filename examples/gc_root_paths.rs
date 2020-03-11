@@ -355,8 +355,16 @@ impl GraphEdge {
         write!(writer, " -> ")?;
         self.dest.write_node_name(writer)?;
         write!(writer, "[")?;
-        write!(writer, "taillabel=\"x{}\"", count)?;
-        write!(writer, "penwidth=\"{}\"", (count as f64).log10().powi(2))?;
+        write!(writer, "label=\"x{}\"", count)?;
+        // arbitrary aesthetic scaling
+        write!(
+            writer,
+            "penwidth=\"{}\"",
+            (count as f64).log10().powi(2) / 3.0
+        )?;
+        if let Some(port) = self.source.node_port() {
+            write!(writer, "tailport=\"{}\"", port)?;
+        }
         write!(writer, "]")?;
         writeln!(writer, ";")
     }
@@ -407,6 +415,18 @@ impl HeapGraphSource {
             } => write!(writer, "class-{}", class_obj_id),
         }?;
         write!(writer, "\"")
+    }
+
+    fn node_port(&self) -> Option<String> {
+        match self {
+            HeapGraphSource::StaticField { field_offset, .. } => {
+                Some(format!("static-field-val-{}", field_offset))
+            }
+            HeapGraphSource::InstanceField { field_offset, .. } => {
+                Some(format!("instance-field-val-{}", field_offset))
+            }
+            _ => None,
+        }
     }
 }
 
