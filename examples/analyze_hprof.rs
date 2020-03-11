@@ -44,14 +44,23 @@ fn main() {
             ),
         )
         .subcommand(
-            clap::SubCommand::with_name("gc-root-paths").arg(
-                clap::Arg::with_name("output")
-                    .short("o")
-                    .long("output")
-                    .help("path to output dot file")
-                    .required(true)
-                    .takes_value(true),
-            ),
+            clap::SubCommand::with_name("gc-root-paths")
+                .arg(
+                    clap::Arg::with_name("output")
+                        .short("o")
+                        .long("output")
+                        .help("path to output dot file")
+                        .required(true)
+                        .takes_value(true),
+                )
+                .arg(
+                    clap::Arg::with_name("min-edge-count")
+                        .long("min-edge-count")
+                        .help("minimum count for an edge to be included")
+                        .required(false)
+                        .default_value("1")
+                        .takes_value(true),
+                ),
         );
     let matches = app.get_matches();
 
@@ -79,14 +88,20 @@ fn main() {
                 .map(|s| path::Path::new(s))
                 .expect("must provide output path"),
         ),
-        ("gc-root-paths", arg_matches) => gc_root_paths::gc_root_paths(
-            &hprof,
-            arg_matches
-                .expect("must provide args")
-                .value_of("output")
-                .map(|s| path::Path::new(s))
-                .expect("must provide output path"),
-        ),
+        ("gc-root-paths", arg_matches) => {
+            let matches = arg_matches.expect("must provide args");
+            gc_root_paths::gc_root_paths(
+                &hprof,
+                matches
+                    .value_of("output")
+                    .map(|s| path::Path::new(s))
+                    .expect("must provide output path"),
+                matches
+                    .value_of("min-edge-count")
+                    .map(|s| s.parse::<u64>().unwrap())
+                    .expect("must provide output path"),
+            )
+        }
         _ => panic!("Unknown subcommand"),
     };
 }

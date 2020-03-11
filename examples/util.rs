@@ -89,15 +89,16 @@ pub fn get_utf8_if_available<'a>(utf8: &'a collections::HashMap<Id, Utf8<'a>>, i
         .unwrap_or("(utf8 not found)")
 }
 
-/// Walk the class hierarchy and build a per-class list of field descriptors, root type's fields last
-pub fn build_class_field_descriptors(
+/// Walk the class hierarchy and build a per-class list of field descriptors, root type's fields last.
+///
+/// Classes are not laid down super class first, so have to wait until the end to be able to
+/// navigate the class hierarchy
+pub fn build_type_hierarchy_field_descriptors(
     classes: &collections::HashMap<Id, MiniClass>,
 ) -> collections::HashMap<Id, Vec<FieldDescriptor>> {
     // class obj id => vec of all instance field descriptors (the class, then super class, then ...)
     let mut class_instance_field_descriptors = collections::HashMap::new();
 
-    // classes are not laid down super class first, so have to wait until the end to be able to
-    // navigate the class hierarchy
     for (id, mc) in classes {
         let mut opt_scid = mc.super_class_obj_id;
         let mut field_descriptors = Vec::<FieldDescriptor>::new();

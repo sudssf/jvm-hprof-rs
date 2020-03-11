@@ -454,6 +454,7 @@ pub struct Instance<'a> {
     stack_trace_serial: Serial,
     #[get_copy = "pub"]
     class_obj_id: Id,
+    /// Instance field values (class, followed by super, super's super ...)
     #[get = "pub"]
     fields: &'a [u8],
 }

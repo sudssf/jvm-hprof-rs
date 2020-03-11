@@ -29,10 +29,22 @@ pub fn class_hierarchy_dot(hprof: &Hprof, output: &path::Path) {
                             &load_classes_by_obj_id,
                             &utf8,
                         );
-                        dot::write_class_node(&class, &utf8, &mut dot).unwrap();
+                        // here, only show each type's own instance fields
+                        dot::write_class_node(
+                            &class,
+                            &class.instance_field_descriptors,
+                            &utf8,
+                            &mut dot,
+                        )
+                        .unwrap();
 
                         if let Some(super_id) = class.super_class_obj_id {
-                            writeln!(dot, "\t{} -> {};", class.obj_id, super_id).unwrap();
+                            writeln!(
+                                dot,
+                                "\t\"class-{}\" -> \"class-{}\";",
+                                class.obj_id, super_id
+                            )
+                            .unwrap();
                         }
                     }
                     _ => {}

@@ -2,10 +2,10 @@ use crate::dot;
 use crate::util::*;
 use jvm_hprof::{heap_dump::*, *};
 
+use std::io::{self, Write};
 use std::{collections, fs, path};
-use std::io::Write;
 
-pub fn gc_root_paths(hprof: &Hprof, output: &path::Path) {
+pub fn gc_root_paths(hprof: &Hprof, output: &path::Path, min_edge_count: u64) {
     // assemble a graph of counts between _types_, not instances, as a way of compressing huge
     // object tangles for easier visual analysis
 
@@ -137,11 +137,11 @@ pub fn gc_root_paths(hprof: &Hprof, output: &path::Path) {
     });
 
     // class obj id => vec of all instance field descriptors (the class, then super class, then ...)
-    let class_instance_field_descriptors = build_class_field_descriptors(&classes);
+    let class_instance_field_descriptors = build_type_hierarchy_field_descriptors(&classes);
 
     // now, iterate over objects again and accumulate edge counts
 
-    let mut graph_edges = collections::HashMap::new();
+    let mut graph_edges: collections::HashMap<GraphEdge, u64> = collections::HashMap::new();
 
     hprof
         .records_iter()
@@ -153,6 +153,7 @@ pub fn gc_root_paths(hprof: &Hprof, output: &path::Path) {
                     let s = p.unwrap();
 
                     match s {
+                        // TODO GC roots
                         SubRecord::Class(c) => {
                             let mc = classes.get(&c.obj_id())
                                 // already know the class exists
@@ -247,11 +248,13 @@ pub fn gc_root_paths(hprof: &Hprof, output: &path::Path) {
     println!("object arrays: {}", object_arrays);
     println!("prim arrays: {}", prim_arrays);
 
+    graph_edges.retain(|edge, count| *count >= min_edge_count);
+
     let mut output_file = fs::File::create(output).unwrap();
 
     writeln!(output_file, "digraph G {{").unwrap();
 
-    // for each class referenced, render a full class box
+    // for each class referenced, add a node with all the fields
     graph_edges
         .keys()
         .filter_map(|edge| match edge.source {
@@ -269,8 +272,72 @@ pub fn gc_root_paths(hprof: &Hprof, output: &path::Path) {
         .iter()
         .for_each(|class_obj_id| {
             let class = classes.get(class_obj_id).unwrap();
-            dot::write_class_node(class, &utf8, &mut output_file);
+            dot::write_class_node(
+                class,
+                class_instance_field_descriptors
+                    .get(class_obj_id)
+                    .expect("Should have fields for all classes"),
+                &utf8,
+                &mut output_file,
+            )
+            .unwrap();
         });
+
+    // TODO when would gc root records show up?
+    // gc roots
+    graph_edges
+        .keys()
+        .filter(|edge| match edge.source {
+            HeapGraphSource::GcRootUnknown => true,
+            HeapGraphSource::GcRootThreadObj => true,
+            HeapGraphSource::GcRootJniGlobal => true,
+            HeapGraphSource::GcRootJniLocalRef => true,
+            HeapGraphSource::GcRootJavaStackFrame => true,
+            HeapGraphSource::GcRootNativeStack => true,
+            HeapGraphSource::GcRootSystemClass => true,
+            HeapGraphSource::GcRootThreadBlock => true,
+            HeapGraphSource::GcRootBusyMonitor => true,
+            HeapGraphSource::StaticField { .. } => false,
+            HeapGraphSource::InstanceField { .. } => false,
+        })
+        .map(|edge| write_to_string(|s| edge.source.write_node_name(s)).unwrap())
+        .collect::<collections::HashSet<String>>()
+        .iter()
+        .for_each(|node_name| {
+            writeln!(
+                output_file,
+                "\t{}[shape=box, label=\"{}\"]",
+                node_name, node_name
+            )
+            .unwrap()
+        });
+
+    // primitive arrays
+    graph_edges
+        .keys()
+        .filter_map(|edge| match edge.dest {
+            HeapGraphDest::InstanceOfClass { .. } => None,
+            HeapGraphDest::ClassObj { .. } => None,
+            HeapGraphDest::PrimitiveArray { prim_type } => Some(prim_type),
+        })
+        .collect::<collections::HashSet<PrimitiveArrayType>>()
+        .iter()
+        .for_each(|&prim_type| {
+            writeln!(
+                output_file,
+                "\t{}[shape=box, label=\"{}[]\"]",
+                write_to_string(|s| HeapGraphDest::PrimitiveArray { prim_type }.write_node_name(s))
+                    .unwrap(),
+                prim_type.java_type_name()
+            )
+            .unwrap()
+        });
+
+    // now, write all the edges
+
+    graph_edges.iter().for_each(|(edge, &count)| {
+        edge.write_dot_edge(count, &mut output_file).unwrap();
+    });
 
     writeln!(output_file, "}}").unwrap();
 }
@@ -279,6 +346,20 @@ pub fn gc_root_paths(hprof: &Hprof, output: &path::Path) {
 struct GraphEdge {
     source: HeapGraphSource,
     dest: HeapGraphDest,
+}
+
+impl GraphEdge {
+    fn write_dot_edge<W: Write>(&self, count: u64, writer: &mut W) -> io::Result<()> {
+        write!(writer, "\t")?;
+        self.source.write_node_name(writer)?;
+        write!(writer, " -> ")?;
+        self.dest.write_node_name(writer)?;
+        write!(writer, "[")?;
+        write!(writer, "taillabel=\"x{}\"", count)?;
+        write!(writer, "penwidth=\"{}\"", (count as f64).log10().powi(2))?;
+        write!(writer, "]")?;
+        writeln!(writer, ";")
+    }
 }
 
 #[derive(Hash, Eq, PartialEq)]
@@ -302,9 +383,64 @@ enum HeapGraphSource {
     },
 }
 
+impl HeapGraphSource {
+    /// Returns the dot node name, with port specifier if applicable
+    fn write_node_name<W: io::Write>(&self, writer: &mut W) -> io::Result<()> {
+        write!(writer, "\"")?;
+        match self {
+            HeapGraphSource::GcRootUnknown => write!(writer, "gc-root-unknown"),
+            HeapGraphSource::GcRootThreadObj => write!(writer, "gc-root-thread-obj"),
+            HeapGraphSource::GcRootJniGlobal => write!(writer, "gc-root-jni-global"),
+            HeapGraphSource::GcRootJniLocalRef => write!(writer, "gc-root-jni-local-ref"),
+            HeapGraphSource::GcRootJavaStackFrame => write!(writer, "gc-root-java-stack-frame"),
+            HeapGraphSource::GcRootNativeStack => write!(writer, "gc-root-native-stack"),
+            HeapGraphSource::GcRootSystemClass => write!(writer, "gc-root-system-class"),
+            HeapGraphSource::GcRootThreadBlock => write!(writer, "gc-root-thread-block"),
+            HeapGraphSource::GcRootBusyMonitor => write!(writer, "gc-root-busy-monitor"),
+            HeapGraphSource::StaticField {
+                class_obj_id,
+                field_offset,
+            } => write!(writer, "class-{}", class_obj_id),
+            HeapGraphSource::InstanceField {
+                class_obj_id,
+                field_offset,
+            } => write!(writer, "class-{}", class_obj_id),
+        }?;
+        write!(writer, "\"")
+    }
+}
+
 #[derive(Hash, Eq, PartialEq)]
 enum HeapGraphDest {
     InstanceOfClass { class_obj_id: Id },
     ClassObj { class_obj_id: Id },
     PrimitiveArray { prim_type: PrimitiveArrayType },
+}
+
+impl HeapGraphDest {
+    fn write_node_name<W: io::Write>(&self, writer: &mut W) -> io::Result<()> {
+        write!(writer, "\"")?;
+
+        match self {
+            HeapGraphDest::InstanceOfClass { class_obj_id } => {
+                write!(writer, "class-{}", class_obj_id)
+            }
+            HeapGraphDest::ClassObj { class_obj_id } => write!(writer, "class-{}", class_obj_id),
+            HeapGraphDest::PrimitiveArray { prim_type } => {
+                write!(writer, "prim-array-{}", prim_type.java_type_name())
+            }
+        }?;
+
+        write!(writer, "\"")
+    }
+}
+
+fn write_to_string<F: FnOnce(&mut Vec<u8>) -> io::Result<()>>(writer: F) -> io::Result<String> {
+    let mut v = Vec::new();
+
+    writer(&mut v)?;
+
+    std::str::from_utf8(v.as_slice())
+        .map(|s| s.to_owned())
+        .map_err(|e| io::Error::new(io::ErrorKind::InvalidData, e))
 }

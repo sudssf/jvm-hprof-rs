@@ -81,7 +81,7 @@ pub fn dump_objects(hprof: &Hprof) {
             _ => {}
         });
 
-    let class_instance_field_descriptors = build_class_field_descriptors(&classes);
+    let class_instance_field_descriptors = build_type_hierarchy_field_descriptors(&classes);
 
     hprof
         .records_iter()
