@@ -28,22 +28,7 @@ pub fn dump_objects(hprof: &Hprof) {
                         SubRecord::Class(c) => {
                             classes.insert(
                                 c.obj_id(),
-                                MiniClass {
-                                    super_class_obj_id: c.super_class_obj_id(),
-                                    static_fields: c.static_fields().map(|r| r.unwrap()).collect(),
-                                    instance_field_descriptors: c
-                                        .instance_field_descriptors()
-                                        .map(|r| r.unwrap())
-                                        .collect(),
-                                    name: load_classes
-                                        .get(&c.obj_id())
-                                        .map(|lc: &LoadClass| {
-                                            utf8.get(&lc.class_name_id())
-                                                .map(|s: &String| s.to_owned())
-                                        })
-                                        .unwrap_or(Some(String::from("missing LoadClass")))
-                                        .unwrap_or(missing_utf8.clone()),
-                                },
+                                MiniClass::from_class(&c, &load_classes, &utf8),
                             );
                         }
                         SubRecord::Instance(instance) => {
@@ -96,25 +81,7 @@ pub fn dump_objects(hprof: &Hprof) {
             _ => {}
         });
 
-    // class obj id => vec of all instance field descriptors (the class, then super class, then ...)
-    let mut class_instance_field_descriptors = collections::HashMap::new();
-
-    // classes are not laid down super class first, so have to wait until the end to be able to
-    // navigate the class hierarchy
-    for (id, mc) in &classes {
-        let mut opt_scid = mc.super_class_obj_id;
-        let mut field_descriptors = Vec::<FieldDescriptor>::new();
-        field_descriptors.extend(mc.instance_field_descriptors.iter());
-        while let Some(scid) = opt_scid {
-            let sc = classes
-                .get(&scid)
-                .expect("Corrupt heap dump? Could not find superclass");
-            field_descriptors.extend(sc.instance_field_descriptors.iter());
-            opt_scid = sc.super_class_obj_id;
-        }
-
-        class_instance_field_descriptors.insert(id, field_descriptors);
-    }
+    let class_instance_field_descriptors = build_class_field_descriptors(&classes);
 
     hprof
         .records_iter()

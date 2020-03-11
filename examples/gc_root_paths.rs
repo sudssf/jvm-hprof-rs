@@ -1,9 +1,11 @@
+use crate::dot;
 use crate::util::*;
 use jvm_hprof::{heap_dump::*, *};
 
-use std::collections;
+use std::{collections, fs, path};
+use std::io::Write;
 
-pub fn gc_root_paths(hprof: &Hprof) {
+pub fn gc_root_paths(hprof: &Hprof, output: &path::Path) {
     // assemble a graph of counts between _types_, not instances, as a way of compressing huge
     // object tangles for easier visual analysis
 
@@ -34,6 +36,7 @@ pub fn gc_root_paths(hprof: &Hprof) {
     let mut instances = 0_u64;
     let mut object_arrays = 0_u64;
     let mut prim_arrays = 0_u64;
+
     hprof.records_iter().map(|r| r.unwrap()).for_each(|r| {
         match r.tag() {
             RecordTag::HeapDump | RecordTag::HeapDumpSegment => {
@@ -75,23 +78,7 @@ pub fn gc_root_paths(hprof: &Hprof) {
                         SubRecord::Class(c) => {
                             classes.insert(
                                 c.obj_id(),
-                                MiniClass {
-                                    super_class_obj_id: c.super_class_obj_id(),
-                                    static_fields: c.static_fields().map(|r| r.unwrap()).collect(),
-                                    instance_field_descriptors: c
-                                        .instance_field_descriptors()
-                                        .map(|r| r.unwrap())
-                                        .collect(),
-                                    // TODO lifetimes to avoid allocation
-                                    name: load_classes
-                                        .get(&c.obj_id())
-                                        .map(|lc: &LoadClass| {
-                                            utf8.get(&lc.class_name_id())
-                                                .map(|s: &String| s.to_owned())
-                                        })
-                                        .unwrap_or(Some(String::from("missing LoadClass")))
-                                        .unwrap_or(missing_utf8.clone()),
-                                },
+                                MiniClass::from_class(&c, &load_classes, &utf8),
                             );
                         }
                         SubRecord::Instance(instance) => {
@@ -150,25 +137,7 @@ pub fn gc_root_paths(hprof: &Hprof) {
     });
 
     // class obj id => vec of all instance field descriptors (the class, then super class, then ...)
-    let mut class_instance_field_descriptors = collections::HashMap::new();
-
-    // classes are not laid down super class first, so have to wait until the end to be able to
-    // navigate the class hierarchy
-    for (id, mc) in &classes {
-        let mut opt_scid = mc.super_class_obj_id;
-        let mut field_descriptors = Vec::<FieldDescriptor>::new();
-        field_descriptors.extend(mc.instance_field_descriptors.iter());
-        while let Some(scid) = opt_scid {
-            let sc = classes
-                .get(&scid)
-                .expect("Corrupt heap dump? Could not find superclass");
-
-            field_descriptors.extend(sc.instance_field_descriptors.iter());
-            opt_scid = sc.super_class_obj_id;
-        }
-
-        class_instance_field_descriptors.insert(id, field_descriptors);
-    }
+    let class_instance_field_descriptors = build_class_field_descriptors(&classes);
 
     // now, iterate over objects again and accumulate edge counts
 
@@ -184,18 +153,17 @@ pub fn gc_root_paths(hprof: &Hprof) {
                     let s = p.unwrap();
 
                     match s {
-                        // TODO class - static fields
+                        SubRecord::Class(c) => {
+                            let mc = classes.get(&c.obj_id())
+                                // already know the class exists
+                                .unwrap();
+                            // TODO class - static fields
+                        }
+
                         SubRecord::Instance(instance) => {
-                            let mc = match classes.get(&instance.class_obj_id()) {
-                                None => panic!(
-                                    "Could not find class {} for instance {}",
-                                    instance.class_obj_id(),
-                                    instance.obj_id()
-                                ),
-                                Some(c) => {
-                                    c
-                                }
-                            };
+                            let mc = classes.get(&instance.class_obj_id())
+                                // already know the class exists
+                                .unwrap();
 
                             let field_descriptors = class_instance_field_descriptors
                                 .get(&instance.class_obj_id())
@@ -212,7 +180,7 @@ pub fn gc_root_paths(hprof: &Hprof) {
                                 match field_val {
                                     FieldValue::ObjectId(Some(field_ref_id)) => {
                                         let source = HeapGraphSource::InstanceField {
-                                            class_id: instance.class_obj_id(),
+                                            class_obj_id: instance.class_obj_id(),
                                             field_offset: index,
                                         };
 
@@ -251,8 +219,12 @@ pub fn gc_root_paths(hprof: &Hprof) {
                                 }
                             }
                         }
-                        // TODO obj arrays
-                        // TODO prim arrays
+                        SubRecord::ObjectArray(obj_array) => {
+                            let mc = classes.get(&obj_array.array_class_obj_id())
+                                // already know the class exists
+                                .unwrap();
+                            // TODO obj arrays
+                        }
                         _ => {}
                     }
                 }
@@ -274,6 +246,33 @@ pub fn gc_root_paths(hprof: &Hprof) {
     println!("instances: {}", instances);
     println!("object arrays: {}", object_arrays);
     println!("prim arrays: {}", prim_arrays);
+
+    let mut output_file = fs::File::create(output).unwrap();
+
+    writeln!(output_file, "digraph G {{").unwrap();
+
+    // for each class referenced, render a full class box
+    graph_edges
+        .keys()
+        .filter_map(|edge| match edge.source {
+            HeapGraphSource::StaticField { class_obj_id, .. } => Some(class_obj_id),
+            HeapGraphSource::InstanceField { class_obj_id, .. } => Some(class_obj_id),
+            _ => None,
+        })
+        .chain(graph_edges.keys().filter_map(|edge| match edge.dest {
+            HeapGraphDest::InstanceOfClass { class_obj_id } => Some(class_obj_id),
+            HeapGraphDest::ClassObj { class_obj_id } => Some(class_obj_id),
+            HeapGraphDest::PrimitiveArray { .. } => None,
+        }))
+        // uniqueify
+        .collect::<collections::HashSet<Id>>()
+        .iter()
+        .for_each(|class_obj_id| {
+            let class = classes.get(class_obj_id).unwrap();
+            dot::write_class_node(class, &utf8, &mut output_file);
+        });
+
+    writeln!(output_file, "}}").unwrap();
 }
 
 #[derive(Hash, Eq, PartialEq)]
@@ -293,8 +292,14 @@ enum HeapGraphSource {
     GcRootSystemClass,
     GcRootThreadBlock,
     GcRootBusyMonitor,
-    StaticField { class_id: Id, field_offset: usize },
-    InstanceField { class_id: Id, field_offset: usize },
+    StaticField {
+        class_obj_id: Id,
+        field_offset: usize,
+    },
+    InstanceField {
+        class_obj_id: Id,
+        field_offset: usize,
+    },
 }
 
 #[derive(Hash, Eq, PartialEq)]

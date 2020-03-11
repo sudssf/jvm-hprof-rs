@@ -10,6 +10,7 @@ use memmap;
 use std::{collections, fs, path};
 
 mod class_hierarchy_dot;
+mod dot;
 mod dump_objects;
 mod gc_root_paths;
 mod util;
@@ -78,7 +79,14 @@ fn main() {
                 .map(|s| path::Path::new(s))
                 .expect("must provide output path"),
         ),
-        ("gc-root-paths", arg_matches) => gc_root_paths::gc_root_paths(&hprof),
+        ("gc-root-paths", arg_matches) => gc_root_paths::gc_root_paths(
+            &hprof,
+            arg_matches
+                .expect("must provide args")
+                .value_of("output")
+                .map(|s| path::Path::new(s))
+                .expect("must provide output path"),
+        ),
         _ => panic!("Unknown subcommand"),
     };
 }
