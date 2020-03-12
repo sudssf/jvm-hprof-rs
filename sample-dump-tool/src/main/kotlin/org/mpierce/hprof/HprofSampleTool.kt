@@ -9,26 +9,40 @@ import java.time.Instant
 object HprofSampleTool {
     @JvmStatic
     fun main(args: Array<String>) {
-        when (val mode = args[0]) {
+        when (args[0]) {
             "startup-heap" -> dumpHeap("startup")
             "primitive-arrays" -> {
 
                 val arrays = listOf(
-                        booleanArrayOf(false, true),
-                        CharArray(10, Int::toChar),
-                        FloatArray(10) { it.toFloat() * 1.1F },
-                        DoubleArray(10) { it.toDouble() * 2.2 },
-                        ByteArray(10, Int::toByte),
-                        ShortArray(10) { (it.toShort() + 100.toShort()).toShort()},
-                        IntArray(10) { it + 200 },
-                        LongArray(10) { it.toLong() + 300L }
+                    booleanArrayOf(false, true),
+                    CharArray(10, Int::toChar),
+                    FloatArray(10) { it.toFloat() * 1.1F },
+                    DoubleArray(10) { it.toDouble() * 2.2 },
+                    ByteArray(10, Int::toByte),
+                    ShortArray(10) { (it.toShort() + 100.toShort()).toShort() },
+                    IntArray(10) { it + 200 },
+                    LongArray(10) { it.toLong() + 300L }
                 )
 
                 dumpHeap("primitive-arrays")
 
                 // keep arrays alive
-                println("${arrays.size}")
+                println("dumped ${arrays.size} arrays")
+            }
+            "superclasses" -> {
+                val objects = (0 until 1000).map {
+                    SpecializedWidget(
+                        TargetObj(it),
+                        it,
+                        (0 until 10).map(::TargetObj),
+                        it.toLong(),
+                        (0 until 100).map(::TargetObj).toSet()
+                    )
+                }
 
+                dumpHeap("superclasses")
+
+                println("dumped ${objects.size} top level objects")
             }
         }
     }
@@ -37,7 +51,7 @@ object HprofSampleTool {
 fun dumpHeap(prefix: String) {
     val server = ManagementFactory.getPlatformMBeanServer()
     val mxBean = ManagementFactory.newPlatformMXBeanProxy(
-            server, "com.sun.management:type=HotSpotDiagnostic", HotSpotDiagnosticMXBean::class.java)
+        server, "com.sun.management:type=HotSpotDiagnostic", HotSpotDiagnosticMXBean::class.java)
 
     val path = Paths.get(".").resolve("$prefix-${Instant.now()}.hprof")
 
@@ -45,3 +59,25 @@ fun dumpHeap(prefix: String) {
     println("Wrote heap to $path")
 }
 
+/**
+ * Exercise superclass navigation
+ */
+open class BaseWidget(
+    val base1: TargetObj,
+    val base2: Int
+)
+
+@Suppress("unused")
+open class Widget(base1: TargetObj,
+                  base2: Int,
+                  val widget1: List<TargetObj>,
+                  val widget2: Long) : BaseWidget(base1, base2)
+
+@Suppress("unused")
+class SpecializedWidget(base1: TargetObj,
+                        base2: Int,
+                        widget1: List<TargetObj>,
+                        widget2: Long,
+                        val flavors: Set<TargetObj>) : Widget(base1, base2, widget1, widget2)
+
+data class TargetObj(val num: Int)
