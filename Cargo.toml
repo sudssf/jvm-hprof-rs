@@ -1,11 +1,13 @@
 [package]
 name = "jvm-hprof"
-version = "0.1.0"
+description = "A parser for JVM hprof heap dumps"
+version = "0.0.1"
 authors = ["Marshall Pierce <marshall@mpierce.org>"]
 edition = "2018"
 keywords = ["jvm", "hprof"]
 license-file = "LICENSE.txt"
 categories = ["development-tools", "parser-implementations"]
+repository = "https://bitbucket.org/marshallpierce/jvm-hprof-rs/src/master/"
 
 [dependencies]
 nom = "5.0.1"
