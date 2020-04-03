@@ -9,10 +9,15 @@ use jvm_hprof::{Hprof, RecordTag};
 use memmap;
 use std::{collections, fs, path};
 
+#[path = "analyze_hprof/class_hierarchy_dot.rs"]
 mod class_hierarchy_dot;
+#[path = "analyze_hprof/dot.rs"]
 mod dot;
+#[path = "analyze_hprof/dump_objects.rs"]
 mod dump_objects;
+#[path = "analyze_hprof/gc_root_paths.rs"]
 mod gc_root_paths;
+#[path = "analyze_hprof/util.rs"]
 mod util;
 
 use util::*;
