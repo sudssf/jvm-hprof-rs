@@ -231,7 +231,7 @@ impl<'a> Record<'a> {
             0x0E => RecordTag::ControlSettings,
             0x1C => RecordTag::HeapDumpSegment,
             0x2C => RecordTag::HeapDumpEnd,
-            _ => panic!("unexpected tag"), // TODO
+            _ => panic!("unexpected tag: {:#X?}", tag_byte[0]), // TODO
         };
 
         let (input, micros) = number::be_u32(input)?;
