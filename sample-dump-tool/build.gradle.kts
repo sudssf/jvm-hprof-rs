@@ -1,5 +1,5 @@
 plugins {
-    kotlin("jvm") version "1.3.70"
+    kotlin("jvm") version "1.4.10"
     application
 }
 
@@ -8,9 +8,9 @@ repositories {
 }
 
 dependencies {
-    implementation(kotlin("stdlib"))
+    implementation("com.github.ajalt.clikt:clikt:3.0.1")
 }
 
 application {
-    mainClassName = "org.mpierce.hprof.HprofSampleTool"
+    mainClass.set("org.mpierce.hprof.HprofSampleTool")
 }
