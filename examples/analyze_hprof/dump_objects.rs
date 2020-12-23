@@ -39,7 +39,7 @@ pub fn dump_objects(hprof: &Hprof) {
                                     instance.class_obj_id(),
                                     instance.obj_id()
                                 ),
-                                Some(c) => {
+                                Some(_c) => {
                                     obj_id_to_class_obj_id
                                         .insert(instance.obj_id(), instance.class_obj_id());
                                 }
@@ -52,7 +52,7 @@ pub fn dump_objects(hprof: &Hprof) {
                                     obj_array.array_class_obj_id(),
                                     obj_array.obj_id()
                                 ),
-                                Some(c) => {
+                                Some(_c) => {
                                     obj_id_to_class_obj_id
                                         .insert(obj_array.obj_id(), obj_array.array_class_obj_id());
                                 }
@@ -252,7 +252,7 @@ pub fn dump_objects(hprof: &Hprof) {
 
                             println!("id {}: {} = [", oa.obj_id(), mc.name);
 
-                            for (index, pr) in oa.elements(hprof.header().id_size()).enumerate() {
+                                for pr in oa.elements(hprof.header().id_size()) {
                                 match pr.unwrap() {
                                     Some(id) => {
                                         println!(
