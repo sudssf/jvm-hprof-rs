@@ -15,8 +15,8 @@ mod class_hierarchy_dot;
 mod dot;
 #[path = "analyze_hprof/dump_objects.rs"]
 mod dump_objects;
-#[path = "analyze_hprof/gc_root_paths.rs"]
-mod gc_root_paths;
+#[path = "analyze_hprof/ref_count_graph.rs"]
+mod ref_count_graph;
 #[path = "analyze_hprof/util.rs"]
 mod util;
 
@@ -49,7 +49,7 @@ fn main() {
             ),
         )
         .subcommand(
-            clap::SubCommand::with_name("gc-root-paths")
+            clap::SubCommand::with_name("ref-count-graph")
                 .arg(
                     clap::Arg::with_name("output")
                         .short("o")
@@ -93,9 +93,9 @@ fn main() {
                 .map(|s| path::Path::new(s))
                 .expect("must provide output path"),
         ),
-        ("gc-root-paths", arg_matches) => {
+        ("ref-count-graph", arg_matches) => {
             let matches = arg_matches.expect("must provide args");
-            gc_root_paths::gc_root_paths(
+            ref_count_graph::ref_count_graph(
                 &hprof,
                 matches
                     .value_of("output")

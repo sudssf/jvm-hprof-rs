@@ -80,6 +80,21 @@ pub fn write_class_node<W: io::Write>(
         }
     }
 
+    // Array classes have JVM names starting with [. A class descriptor doesn't say whether or not
+    // it's an array class directly, so the only other way we could detect them is looking for
+    // classes that have SubRecord::ObjectArray instances, which seems even jankier.
+    // We write a separate column for the array contents so that outgoing edges have a specific
+    // exit point rather than going from anywhere on the node.
+
+    // TODO Specifically we only care about [L, [[L, etc and not primitive arrays like [Z, [[J, etc
+    // since primitive arrays will never be the source of an edge
+    if class.name.starts_with("[") {
+        writeln!(
+            writer,
+            "<TR><TD COLSPAN=\"2\" PORT=\"array-contents\">(array contents)</TD></TR>",
+        )?;
+    }
+
     writeln!(writer, "</TABLE>")?;
     writeln!(writer, "\t>];")?;
 

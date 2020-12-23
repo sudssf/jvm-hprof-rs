@@ -5,7 +5,7 @@ use jvm_hprof::{heap_dump::*, *};
 use std::io::{self, Write};
 use std::{collections, fs, path};
 
-pub fn gc_root_paths(hprof: &Hprof, output: &path::Path, min_edge_count: u64) {
+pub fn ref_count_graph(hprof: &Hprof, output: &path::Path, min_edge_count: u64) {
     // assemble a graph of counts between _types_, not instances, as a way of compressing huge
     // object tangles for easier visual analysis
 
@@ -91,7 +91,7 @@ pub fn gc_root_paths(hprof: &Hprof, output: &path::Path, min_edge_count: u64) {
                                     instance.class_obj_id(),
                                     instance.obj_id()
                                 ),
-                                Some(c) => {
+                                Some(_c) => {
                                     obj_id_to_class_obj_id
                                         .insert(instance.obj_id(), instance.class_obj_id());
                                 }
@@ -105,7 +105,7 @@ pub fn gc_root_paths(hprof: &Hprof, output: &path::Path, min_edge_count: u64) {
                                     obj_array.array_class_obj_id(),
                                     obj_array.obj_id()
                                 ),
-                                Some(c) => {
+                                Some(_c) => {
                                     obj_id_to_class_obj_id
                                         .insert(obj_array.obj_id(), obj_array.array_class_obj_id());
                                 }
@@ -143,6 +143,37 @@ pub fn gc_root_paths(hprof: &Hprof, output: &path::Path, min_edge_count: u64) {
 
     let mut graph_edges: collections::HashMap<GraphEdge, u64> = collections::HashMap::new();
 
+    let id_size = hprof.header().id_size();
+
+    let edge_dest_for_obj_id = |obj_id: Id| {
+        obj_id_to_class_obj_id
+            .get(&obj_id)
+            .map(|class_obj_id| HeapGraphDest::InstanceOfClass {
+                class_obj_id: *class_obj_id,
+            })
+            .or_else(|| {
+                prim_array_obj_id_to_type.get(&obj_id).map(|prim_type| {
+                    HeapGraphDest::PrimitiveArray {
+                        prim_type: *prim_type,
+                    }
+                })
+            })
+            .or_else(|| {
+                classes
+                    .get(&obj_id)
+                    .map(|_dest_class| HeapGraphDest::ClassObj {
+                        class_obj_id: obj_id,
+                    })
+            })
+    };
+
+    let mut bump_edge_counter = |source: HeapGraphSource, dest: HeapGraphDest| {
+        graph_edges
+            .entry(GraphEdge { source, dest })
+            .and_modify(|c| *c += 1)
+            .or_insert(1_u64);
+    };
+
     hprof
         .records_iter()
         .map(|r| r.unwrap())
@@ -155,7 +186,7 @@ pub fn gc_root_paths(hprof: &Hprof, output: &path::Path, min_edge_count: u64) {
                     match s {
                         // TODO GC roots
                         SubRecord::Class(c) => {
-                            let mc = classes.get(&c.obj_id())
+                            let _mc = classes.get(&c.obj_id())
                                 // already know the class exists
                                 .unwrap();
                             // TODO class - static fields
@@ -174,7 +205,7 @@ pub fn gc_root_paths(hprof: &Hprof, output: &path::Path, min_edge_count: u64) {
                             for (index, fd) in field_descriptors.iter().enumerate() {
                                 let (input, field_val) = fd
                                     .field_type()
-                                    .parse_value(field_val_input, hprof.header().id_size())
+                                    .parse_value(field_val_input, id_size)
                                     .unwrap();
                                 field_val_input = input;
 
@@ -185,35 +216,14 @@ pub fn gc_root_paths(hprof: &Hprof, output: &path::Path, min_edge_count: u64) {
                                             field_offset: index,
                                         };
 
-                                        let dest_opt = obj_id_to_class_obj_id.get(&field_ref_id)
-                                            .map(|class_obj_id| HeapGraphDest::InstanceOfClass { class_obj_id: *class_obj_id })
-                                            .or_else(|| {
-                                                prim_array_obj_id_to_type.get(&field_ref_id)
-                                                    .map(|prim_type| {
-                                                        HeapGraphDest::PrimitiveArray { prim_type: *prim_type }
-                                                    })
-                                            })
-                                            .or_else(|| {
-                                                classes.get(&field_ref_id)
-                                                    .map(|dest_class| {
-                                                        HeapGraphDest::ClassObj { class_obj_id: field_ref_id }
-                                                    })
-                                            });
-
-                                        match dest_opt {
-                                            None => {
-                                                eprintln!(
-                                                    "Could not find any match for obj {:?}: {} in field {}",
-                                                    field_ref_id,
-                                                    mc.name,
-                                                    utf8.get(&fd.name_id()).unwrap_or(&missing_utf8)
-                                                );
-                                            }
-                                            Some(dest) => {
-                                                graph_edges.entry(GraphEdge { source, dest })
-                                                    .and_modify(|c| *c += 1)
-                                                    .or_insert(1_u64);
-                                            }
+                                        match edge_dest_for_obj_id(field_ref_id) {
+                                            None => eprintln!(
+                                                "Could not find any match for obj {:?}: {} in field {}",
+                                                field_ref_id,
+                                                mc.name,
+                                                utf8.get(&fd.name_id()).unwrap_or(&missing_utf8)
+                                            ),
+                                            Some(dest) => bump_edge_counter(source, dest)
                                         }
                                     }
                                     _ => {}
@@ -224,7 +234,23 @@ pub fn gc_root_paths(hprof: &Hprof, output: &path::Path, min_edge_count: u64) {
                             let mc = classes.get(&obj_array.array_class_obj_id())
                                 // already know the class exists
                                 .unwrap();
-                            // TODO obj arrays
+                            obj_array.elements(id_size)
+                                .filter_map(|res| res.unwrap())
+                                .for_each(|id| {
+                                    let source = HeapGraphSource::ObjectArray {
+                                        class_obj_id: mc.obj_id
+                                    };
+
+                                    match edge_dest_for_obj_id(id) {
+                                        None => eprintln!(
+                                            "Could not find any match for obj {:?} in array {:?} ({})",
+                                            id,
+                                            obj_array.array_class_obj_id(),
+                                            mc.name
+                                        ),
+                                        Some(dest) => bump_edge_counter(source, dest)
+                                    }
+                                })
                         }
                         _ => {}
                     }
@@ -248,7 +274,7 @@ pub fn gc_root_paths(hprof: &Hprof, output: &path::Path, min_edge_count: u64) {
     println!("object arrays: {}", object_arrays);
     println!("prim arrays: {}", prim_arrays);
 
-    graph_edges.retain(|edge, count| *count >= min_edge_count);
+    graph_edges.retain(|_edge, count| *count >= min_edge_count);
 
     let mut output_file = fs::File::create(output).unwrap();
 
@@ -260,6 +286,7 @@ pub fn gc_root_paths(hprof: &Hprof, output: &path::Path, min_edge_count: u64) {
         .filter_map(|edge| match edge.source {
             HeapGraphSource::StaticField { class_obj_id, .. } => Some(class_obj_id),
             HeapGraphSource::InstanceField { class_obj_id, .. } => Some(class_obj_id),
+            HeapGraphSource::ObjectArray { class_obj_id } => Some(class_obj_id),
             _ => None,
         })
         .chain(graph_edges.keys().filter_map(|edge| match edge.dest {
@@ -267,7 +294,7 @@ pub fn gc_root_paths(hprof: &Hprof, output: &path::Path, min_edge_count: u64) {
             HeapGraphDest::ClassObj { class_obj_id } => Some(class_obj_id),
             HeapGraphDest::PrimitiveArray { .. } => None,
         }))
-        // uniqueify
+        // uniqueify -- each id will only have one source mode
         .collect::<collections::HashSet<Id>>()
         .iter()
         .for_each(|class_obj_id| {
@@ -280,7 +307,7 @@ pub fn gc_root_paths(hprof: &Hprof, output: &path::Path, min_edge_count: u64) {
                 &utf8,
                 &mut output_file,
             )
-            .unwrap();
+            .unwrap()
         });
 
     // TODO when would gc root records show up?
@@ -299,6 +326,7 @@ pub fn gc_root_paths(hprof: &Hprof, output: &path::Path, min_edge_count: u64) {
             HeapGraphSource::GcRootBusyMonitor => true,
             HeapGraphSource::StaticField { .. } => false,
             HeapGraphSource::InstanceField { .. } => false,
+            HeapGraphSource::ObjectArray { .. } => false,
         })
         .map(|edge| write_to_string(|s| edge.source.write_node_name(s)).unwrap())
         .collect::<collections::HashSet<String>>()
@@ -389,12 +417,16 @@ enum HeapGraphSource {
         class_obj_id: Id,
         field_offset: usize,
     },
+    ObjectArray {
+        class_obj_id: Id,
+    },
 }
 
 impl HeapGraphSource {
-    /// Returns the dot node name, with port specifier if applicable
+    /// Returns the dot node name
     fn write_node_name<W: io::Write>(&self, writer: &mut W) -> io::Result<()> {
         write!(writer, "\"")?;
+        // Matches naming convention in dot:: functions
         match self {
             HeapGraphSource::GcRootUnknown => write!(writer, "gc-root-unknown"),
             HeapGraphSource::GcRootThreadObj => write!(writer, "gc-root-thread-obj"),
@@ -405,19 +437,22 @@ impl HeapGraphSource {
             HeapGraphSource::GcRootSystemClass => write!(writer, "gc-root-system-class"),
             HeapGraphSource::GcRootThreadBlock => write!(writer, "gc-root-thread-block"),
             HeapGraphSource::GcRootBusyMonitor => write!(writer, "gc-root-busy-monitor"),
-            HeapGraphSource::StaticField {
-                class_obj_id,
-                field_offset,
-            } => write!(writer, "class-{}", class_obj_id),
-            HeapGraphSource::InstanceField {
-                class_obj_id,
-                field_offset,
-            } => write!(writer, "class-{}", class_obj_id),
+            HeapGraphSource::StaticField { class_obj_id, .. } => {
+                write!(writer, "class-{}", class_obj_id)
+            }
+            HeapGraphSource::InstanceField { class_obj_id, .. } => {
+                write!(writer, "class-{}", class_obj_id)
+            }
+            // edges from an object array appear from the class for the [L type
+            HeapGraphSource::ObjectArray { class_obj_id } => {
+                write!(writer, "class-{}", class_obj_id)
+            }
         }?;
         write!(writer, "\"")
     }
 
     fn node_port(&self) -> Option<String> {
+        // Matches naming convention in dot::write_class_node
         match self {
             HeapGraphSource::StaticField { field_offset, .. } => {
                 Some(format!("static-field-val-{}", field_offset))
@@ -425,6 +460,7 @@ impl HeapGraphSource {
             HeapGraphSource::InstanceField { field_offset, .. } => {
                 Some(format!("instance-field-val-{}", field_offset))
             }
+            HeapGraphSource::ObjectArray { .. } => Some(String::from("array-contents")),
             _ => None,
         }
     }

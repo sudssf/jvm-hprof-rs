@@ -252,7 +252,7 @@ pub fn dump_objects(hprof: &Hprof) {
 
                             println!("id {}: {} = [", oa.obj_id(), mc.name);
 
-                                for pr in oa.elements(hprof.header().id_size()) {
+                            for pr in oa.elements(hprof.header().id_size()) {
                                 match pr.unwrap() {
                                     Some(id) => {
                                         println!(
