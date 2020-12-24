@@ -65,10 +65,7 @@ impl<'a> SubRecord<'a> {
         }
     }
 
-    pub(crate) fn parse<'i: 'r, 'r>(
-        input: &'i [u8],
-        id_size: IdSize,
-    ) -> nom::IResult<&'i [u8], SubRecord<'r>> {
+    pub(crate) fn parse(input: &[u8], id_size: IdSize) -> nom::IResult<&[u8], SubRecord> {
         // https://github.com/openjdk/jdk/blob/08822b4e0526fe001c39fe08e241b849eddf481d/src/hotspot/share/services/heapDumper.cpp#L178
         let (input, tag_byte) = number::be_u8(input)?;
 
@@ -355,7 +352,7 @@ impl<'a> Class<'a> {
         }
     }
 
-    fn parse<'i: 'r, 'r>(input: &'i [u8], id_size: IdSize) -> nom::IResult<&'i [u8], Class<'r>> {
+    fn parse(input: &[u8], id_size: IdSize) -> nom::IResult<&[u8], Class> {
         // https://github.com/openjdk/jdk/blob/08822b4e0526fe001c39fe08e241b849eddf481d/src/hotspot/share/services/heapDumper.cpp#L226
         // dump_class_and_array_classes https://github.com/openjdk/jdk/blob/08822b4e0526fe001c39fe08e241b849eddf481d/src/hotspot/share/services/heapDumper.cpp#L995
         let (input, obj_id) = Id::parse(input, id_size)?;
@@ -460,7 +457,7 @@ pub struct Instance<'a> {
 }
 
 impl<'a> Instance<'a> {
-    fn parse<'i: 'r, 'r>(input: &'i [u8], id_size: IdSize) -> nom::IResult<&'i [u8], Instance<'r>> {
+    fn parse(input: &[u8], id_size: IdSize) -> nom::IResult<&[u8], Instance> {
         // https://github.com/openjdk/jdk/blob/08822b4e0526fe001c39fe08e241b849eddf481d/src/hotspot/share/services/heapDumper.cpp#L262
         let (input, obj_id) = Id::parse(input, id_size)?;
         let (input, stack_trace_serial) = number::be_u32(input)?;
@@ -493,10 +490,7 @@ pub struct ObjectArray<'a> {
 }
 
 impl<'a> ObjectArray<'a> {
-    fn parse<'i: 'r, 'r>(
-        input: &'i [u8],
-        id_size: IdSize,
-    ) -> nom::IResult<&'i [u8], ObjectArray<'r>> {
+    fn parse(input: &[u8], id_size: IdSize) -> nom::IResult<&[u8], ObjectArray> {
         // https://github.com/openjdk/jdk/blob/08822b4e0526fe001c39fe08e241b849eddf481d/src/hotspot/share/services/heapDumper.cpp#L271
         let (input, obj_id) = Id::parse(input, id_size)?;
         let (input, stack_trace_serial) = number::be_u32(input)?;

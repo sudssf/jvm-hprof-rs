@@ -27,10 +27,7 @@ macro_rules! iterator_method {
 }
 
 impl<'a> PrimitiveArray<'a> {
-    pub(crate) fn parse<'i: 'r, 'r>(
-        input: &'i [u8],
-        id_size: IdSize,
-    ) -> nom::IResult<&'i [u8], PrimitiveArray<'r>> {
+    pub(crate) fn parse(input: &[u8], id_size: IdSize) -> nom::IResult<&[u8], PrimitiveArray> {
         // https://github.com/openjdk/jdk/blob/08822b4e0526fe001c39fe08e241b849eddf481d/src/hotspot/share/services/heapDumper.cpp#L279
         let (input, obj_id) = Id::parse(input, id_size)?;
         let (input, stack_trace_serial) = number::be_u32(input)?;

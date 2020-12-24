@@ -7,6 +7,7 @@ use std::{cmp, fmt};
 
 pub mod heap_dump;
 mod parsing_iterator;
+
 use parsing_iterator::*;
 
 #[derive(CopyGetters, Copy, Clone, Debug, Eq, Hash, PartialEq)]
@@ -66,10 +67,7 @@ pub struct Hprof<'a> {
 }
 
 impl<'a> Hprof<'a> {
-    pub fn records_iter<'i>(&self) -> Records<'i>
-    where
-        'a: 'i,
-    {
+    pub fn records_iter(&self) -> Records<'a> {
         Records {
             remaining: self.records,
             id_size: self.header.id_size,
@@ -212,7 +210,7 @@ impl<'a> Record<'a> {
         }
     }
 
-    fn parse<'i: 'r, 'r>(input: &'i [u8], id_size: IdSize) -> nom::IResult<&'i [u8], Record<'r>> {
+    fn parse(input: &[u8], id_size: IdSize) -> nom::IResult<&[u8], Record> {
         // https://github.com/openjdk/jdk/blob/08822b4e0526fe001c39fe08e241b849eddf481d/src/hotspot/share/services/heapDumper.cpp#L76
         let (input, tag_byte) = bytes::take(1_usize)(input)?;
 
@@ -315,7 +313,7 @@ impl<'a> Utf8<'a> {
     }
 
     /// Note that in practice, there are nonzero Utf8 records with invalid UTF-8 bytes.
-    pub fn text_as_str(&self) -> Result<&str, std::str::Utf8Error> {
+    pub fn text_as_str(&self) -> Result<&'a str, std::str::Utf8Error> {
         std::str::from_utf8(self.text)
     }
 }
