@@ -194,14 +194,14 @@ impl<'a> Record<'a> {
         }
     }
 
-    pub fn as_stack_trace(&self) -> Option<ParseResult<StackTrace>> {
+    pub fn as_stack_trace(&self) -> Option<ParseResult<StackTrace<'a>>> {
         match self.tag {
             RecordTag::StackTrace => Some(StackTrace::parse(self.body, self.id_size)),
             _ => None,
         }
     }
 
-    pub fn as_heap_dump_segment(&self) -> Option<ParseResult<HeapDumpSegment>> {
+    pub fn as_heap_dump_segment(&self) -> Option<ParseResult<HeapDumpSegment<'a>>> {
         match self.tag {
             RecordTag::HeapDump | RecordTag::HeapDumpSegment => {
                 Some(HeapDumpSegment::parse(self.body, self.id_size))
@@ -470,7 +470,7 @@ impl<'a> HeapDumpSegment<'a> {
         })
     }
 
-    pub fn sub_records(&self) -> SubRecords {
+    pub fn sub_records(&self) -> SubRecords<'a> {
         SubRecords {
             id_size: self.id_size,
             remaining: self.records,
