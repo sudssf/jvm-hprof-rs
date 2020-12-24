@@ -184,12 +184,100 @@ pub fn ref_count_graph(hprof: &Hprof, output: &path::Path, min_edge_count: u64) 
                     let s = p.unwrap();
 
                     match s {
-                        // TODO GC roots
+                        SubRecord::GcRootUnknown(gc_root) => match edge_dest_for_obj_id(gc_root.obj_id()) {
+                            None => eprintln!(
+                                "Could not find any match for obj {:?} in GcRootUnknown",
+                                gc_root.obj_id(),
+                            ),
+                            Some(dest) => bump_edge_counter(HeapGraphSource::GcRootUnknown, dest)
+                        },
+                        SubRecord::GcRootThreadObj(gc_root) => gc_root.thread_obj_id().iter().for_each(|obj_id| {
+                            match edge_dest_for_obj_id(*obj_id) {
+                                None => eprintln!(
+                                    "Could not find any match for obj {:?} in GcRootThreadObj",
+                                    obj_id,
+                                ),
+                                Some(dest) => bump_edge_counter(HeapGraphSource::GcRootThreadObj, dest)
+                            }
+                        }),
+                        SubRecord::GcRootJniGlobal(gc_root) => match edge_dest_for_obj_id(gc_root.obj_id()) {
+                            None => eprintln!(
+                                "Could not find any match for obj {:?} in GcRootJniGlobal",
+                                gc_root.obj_id(),
+                            ),
+                            Some(dest) => bump_edge_counter(HeapGraphSource::GcRootJniGlobal, dest)
+                        },
+                        SubRecord::GcRootJniLocalRef(gc_root) => match edge_dest_for_obj_id(gc_root.obj_id()) {
+                            None => eprintln!(
+                                "Could not find any match for obj {:?} in GcRootJniLocalRef",
+                                gc_root.obj_id(),
+                            ),
+                            Some(dest) => bump_edge_counter(HeapGraphSource::GcRootJniLocalRef, dest)
+                        },
+                        SubRecord::GcRootJavaStackFrame(gc_root) => match edge_dest_for_obj_id(gc_root.obj_id()) {
+                            None => eprintln!(
+                                "Could not find any match for obj {:?} in GcRootJavaStackFrame",
+                                gc_root.obj_id(),
+                            ),
+                            Some(dest) => bump_edge_counter(HeapGraphSource::GcRootJavaStackFrame, dest)
+                        },
+                        SubRecord::GcRootNativeStack(gc_root) => match edge_dest_for_obj_id(gc_root.obj_id()) {
+                            None => eprintln!(
+                                "Could not find any match for obj {:?} in GcRootNativeStack",
+                                gc_root.obj_id(),
+                            ),
+                            Some(dest) => bump_edge_counter(HeapGraphSource::GcRootNativeStack, dest)
+                        },
+                        SubRecord::GcRootSystemClass(gc_root) => match edge_dest_for_obj_id(gc_root.obj_id()) {
+                            None => eprintln!(
+                                "Could not find any match for obj {:?} in GcRootSystemClass",
+                                gc_root.obj_id(),
+                            ),
+                            Some(dest) => bump_edge_counter(HeapGraphSource::GcRootSystemClass, dest)
+                        },
+                        SubRecord::GcRootThreadBlock(gc_root) => match edge_dest_for_obj_id(gc_root.obj_id()) {
+                            None => eprintln!(
+                                "Could not find any match for obj {:?} in GcRootThreadBlock",
+                                gc_root.obj_id(),
+                            ),
+                            Some(dest) => bump_edge_counter(HeapGraphSource::GcRootThreadBlock, dest)
+                        },
+                        SubRecord::GcRootBusyMonitor(gc_root) => match edge_dest_for_obj_id(gc_root.obj_id()) {
+                            None => eprintln!(
+                                "Could not find any match for obj {:?} in GcRootBusyMonitor",
+                                gc_root.obj_id(),
+                            ),
+                            Some(dest) => bump_edge_counter(HeapGraphSource::GcRootBusyMonitor, dest)
+                        },
+                        SubRecord::PrimitiveArray(_) => { /* primitive arrays have no refs */ }
                         SubRecord::Class(c) => {
-                            let _mc = classes.get(&c.obj_id())
+                            let mc = classes.get(&c.obj_id())
                                 // already know the class exists
                                 .unwrap();
-                            // TODO class - static fields
+
+                            mc.static_fields.iter()
+                                .enumerate()
+                                .for_each(|(index, sf)| {
+                                    match sf.value() {
+                                        FieldValue::ObjectId(Some(field_ref_id)) => {
+                                            let source = HeapGraphSource::StaticField {
+                                                class_obj_id: c.obj_id(),
+                                                field_offset: index,
+                                            };
+
+                                            match edge_dest_for_obj_id(field_ref_id) {
+                                                None => eprintln!(
+                                                    "Could not find any match for obj {:?}: {} in static field {}",
+                                                    field_ref_id,
+                                                    mc.name,
+                                                    utf8.get(&sf.name_id()).unwrap_or(&missing_utf8)
+                                                ),
+                                                Some(dest) => bump_edge_counter(source, dest)
+                                            }
+                                        }
+                                        _ => {}
+                                    }
+                                });
                         }
 
                         SubRecord::Instance(instance) => {
@@ -252,7 +340,6 @@ pub fn ref_count_graph(hprof: &Hprof, output: &path::Path, min_edge_count: u64) 
                                     }
                                 })
                         }
-                        _ => {}
                     }
                 }
             }
@@ -310,7 +397,6 @@ pub fn ref_count_graph(hprof: &Hprof, output: &path::Path, min_edge_count: u64) 
             .unwrap()
         });
 
-    // TODO when would gc root records show up?
     // gc roots
     graph_edges
         .keys()
@@ -334,7 +420,7 @@ pub fn ref_count_graph(hprof: &Hprof, output: &path::Path, min_edge_count: u64) 
         .for_each(|node_name| {
             writeln!(
                 output_file,
-                "\t{}[shape=box, label=\"{}\"]",
+                "\t{}[shape=box, label={}]",
                 node_name, node_name
             )
             .unwrap()
@@ -398,7 +484,7 @@ impl GraphEdge {
     }
 }
 
-#[derive(Hash, Eq, PartialEq)]
+#[derive(Hash, Eq, PartialEq, Debug)]
 enum HeapGraphSource {
     GcRootUnknown,
     GcRootThreadObj,
