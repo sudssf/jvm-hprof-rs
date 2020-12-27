@@ -506,6 +506,8 @@ impl<'a> ObjectArray<'a> {
     }
 }
 
+// TODO referenced in heapDumper.cpp, but not actually written?
+#[allow(unused)]
 enum ConstantPoolEntry {}
 
 #[derive(CopyGetters, Clone, Copy, Debug)]

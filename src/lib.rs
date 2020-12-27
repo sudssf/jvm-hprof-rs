@@ -350,6 +350,8 @@ impl LoadClass {
     }
 }
 
+// TODO referenced in heapDumper.cpp, but not actually written?
+#[allow(unused)]
 struct UnloadClass {
     class_serial: Serial,
 }
@@ -431,6 +433,8 @@ impl<'a> StackTrace<'a> {
 }
 
 /// Heap allocation sites, obtained after GC
+// TODO referenced in heapDumper.cpp, but not actually written?
+#[allow(unused)]
 struct AllocSites {
     flags: AllocSitesFlags,
     cutoff_ratio: u32,
@@ -442,6 +446,8 @@ struct AllocSites {
     // TODO iterator over following AllocSite instances
 }
 
+// TODO referenced in heapDumper.cpp, but not actually written?
+#[allow(unused)]
 struct StartThread {
     thread_serial: Serial,
     thread_id: Id,
@@ -451,10 +457,14 @@ struct StartThread {
     thread_group_parent_name_id: Id,
 }
 
+// TODO referenced in heapDumper.cpp, but not actually written?
+#[allow(unused)]
 struct EndThread {
     thread_serial: Serial,
 }
 
+// TODO referenced in heapDumper.cpp, but not actually written?
+#[allow(unused)]
 struct HeapSummary {
     total_live_bytes: u32,
 }
@@ -505,12 +515,16 @@ impl<'a> Iterator for SubRecords<'a> {
     }
 }
 
+// TODO referenced in heapDumper.cpp, but not actually written?
+#[allow(unused)]
 struct CpuSamples {
     num_samples: u32,
     num_traces: u32,
     // TODO iterator over samples
 }
 
+// TODO referenced in heapDumper.cpp, but not actually written?
+#[allow(unused)]
 struct ControlSettings {
     bits: u32,
     stack_trace_depth: u16,
@@ -559,6 +573,8 @@ struct AllocSitesFlags {
 }
 
 impl AllocSitesFlags {
+    // TODO referenced in heapDumper.cpp, but not actually written?
+    #[allow(unused)]
     fn mode(&self) -> AllocSitesFlagsMode {
         // TODO naming, correctness?
         if self.bits & 0x001 > 0 {
@@ -568,6 +584,8 @@ impl AllocSitesFlags {
         }
     }
 
+    // TODO referenced in heapDumper.cpp, but not actually written?
+    #[allow(unused)]
     fn sorting(&self) -> AllocSitesFlagsSorting {
         // TODO
         if self.bits & 0x002 > 0 {
@@ -577,21 +595,29 @@ impl AllocSitesFlags {
         }
     }
 
+    // TODO referenced in heapDumper.cpp, but not actually written?
+    #[allow(unused)]
     fn force_gc(&self) -> bool {
         self.bits & 0x0004 > 0
     }
 }
 
+// TODO referenced in heapDumper.cpp, but not actually written?
+#[allow(unused)]
 enum AllocSitesFlagsMode {
     Incremental,
     Complete,
 }
 
+// TODO referenced in heapDumper.cpp, but not actually written?
+#[allow(unused)]
 enum AllocSitesFlagsSorting {
     Allocation,
     Live,
 }
 
+// TODO referenced in heapDumper.cpp, but not actually written?
+#[allow(unused)]
 enum ObjOrArrayType {
     Object,
     ObjectArray,
@@ -606,6 +632,8 @@ enum ObjOrArrayType {
 }
 
 impl ObjOrArrayType {
+    // TODO referenced in heapDumper.cpp, but not actually written?
+    #[allow(unused)]
     fn from_num(num: u8) -> ObjOrArrayType {
         match num {
             0 => ObjOrArrayType::Object,
@@ -623,6 +651,8 @@ impl ObjOrArrayType {
     }
 }
 
+// TODO referenced in heapDumper.cpp, but not actually written?
+#[allow(unused)]
 struct AllocSite {
     is_array: ObjOrArrayType,
     /// May be zero during startup
