@@ -14,9 +14,9 @@ use std::{collections, io};
 /// the list of static fields.
 /// Instance field descriptors have a port `instance-field-val-<offset>`
 pub fn write_class_node<W: io::Write>(
-    class: &MiniClass,
+    class: &EzClass,
     instance_field_descriptors: &[FieldDescriptor],
-    utf8: &collections::HashMap<Id, String>,
+    utf8: &collections::HashMap<Id, &str>,
     writer: &mut W,
 ) -> io::Result<()> {
     // dot supports html-ish tables
@@ -49,11 +49,7 @@ pub fn write_class_node<W: io::Write>(
             writeln!(
                 writer,
                 "<TR><TD>{}</TD><TD PORT=\"{}\">{}</TD></TR>",
-                escaper::encode_minimal(
-                    utf8.get(&sf.name_id())
-                        .map(|s| s.as_str())
-                        .unwrap_or("(utf8 not found)")
-                ),
+                escaper::encode_minimal(utf8.get(&sf.name_id()).unwrap_or(&"(utf8 not found)")),
                 &format!("static-field-val-{}", index),
                 escaper::encode_minimal(&format!("{:?}", sf.value()))
             )?;
@@ -69,11 +65,7 @@ pub fn write_class_node<W: io::Write>(
             writeln!(
                 writer,
                 "<TR><TD>{}</TD><TD PORT=\"{}\">{}</TD></TR>",
-                escaper::encode_minimal(
-                    utf8.get(&fd.name_id())
-                        .map(|s| s.as_str())
-                        .unwrap_or("(utf8 not found)")
-                ),
+                escaper::encode_minimal(utf8.get(&fd.name_id()).unwrap_or(&"(utf8 not found)")),
                 &format!("instance-field-val-{}", index),
                 escaper::encode_minimal(&format!("{:?}", fd.field_type()))
             )?;
@@ -87,7 +79,8 @@ pub fn write_class_node<W: io::Write>(
     // exit point rather than going from anywhere on the node.
 
     // TODO Specifically we only care about [L, [[L, etc and not primitive arrays like [Z, [[J, etc
-    // since primitive arrays will never be the source of an edge
+    // since primitive arrays will never be the source of an edge but it probably doesn't do too
+    // much harm to add this row for primitive arrays too
     if class.name.starts_with("[") {
         writeln!(
             writer,

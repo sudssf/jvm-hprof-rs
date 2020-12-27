@@ -23,12 +23,8 @@ pub fn class_hierarchy_dot(hprof: &Hprof, output: &path::Path) {
                 let s = p.unwrap();
 
                 match s {
-                    SubRecord::Class(_) => {
-                        let class = MiniClass::from_class(
-                            s.as_class().unwrap(),
-                            &load_classes_by_obj_id,
-                            &utf8,
-                        );
+                    SubRecord::Class(class) => {
+                        let class = EzClass::from_class(&class, &load_classes_by_obj_id, &utf8);
                         // here, only show each type's own instance fields
                         dot::write_class_node(
                             &class,

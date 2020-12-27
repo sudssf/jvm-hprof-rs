@@ -8,13 +8,15 @@ pub fn dump_objects(hprof: &Hprof) {
     // name id -> String
     let mut utf8 = collections::HashMap::new();
 
-    let mut classes: collections::HashMap<Id, MiniClass> = collections::HashMap::new();
+    let mut classes: collections::HashMap<Id, EzClass> = collections::HashMap::new();
     // instance obj id to class obj id
     // TODO if this gets big, could use lmdb or similar to get it off-heap
     let mut obj_id_to_class_obj_id: collections::HashMap<Id, Id> = collections::HashMap::new();
     let mut prim_array_obj_id_to_type = collections::HashMap::new();
 
-    let missing_utf8 = String::from("(missing utf8)");
+    let missing_utf8 = "(missing utf8)";
+
+    // build obj -> class and class id -> class metadata maps
 
     hprof
         .records_iter()
@@ -26,37 +28,16 @@ pub fn dump_objects(hprof: &Hprof) {
                     let s = p.unwrap();
                     match s {
                         SubRecord::Class(c) => {
-                            classes.insert(
-                                c.obj_id(),
-                                MiniClass::from_class(&c, &load_classes, &utf8),
-                            );
+                            classes
+                                .insert(c.obj_id(), EzClass::from_class(&c, &load_classes, &utf8));
                         }
                         SubRecord::Instance(instance) => {
-                            // classes are dumped before instances, so we should be able to look up
-                            match classes.get(&instance.class_obj_id()) {
-                                None => panic!(
-                                    "Could not find class {} for instance {}",
-                                    instance.class_obj_id(),
-                                    instance.obj_id()
-                                ),
-                                Some(_c) => {
-                                    obj_id_to_class_obj_id
-                                        .insert(instance.obj_id(), instance.class_obj_id());
-                                }
-                            };
+                            obj_id_to_class_obj_id
+                                .insert(instance.obj_id(), instance.class_obj_id());
                         }
                         SubRecord::ObjectArray(obj_array) => {
-                            match classes.get(&obj_array.array_class_obj_id()) {
-                                None => panic!(
-                                    "Could not find class {} for object array {}",
-                                    obj_array.array_class_obj_id(),
-                                    obj_array.obj_id()
-                                ),
-                                Some(_c) => {
-                                    obj_id_to_class_obj_id
-                                        .insert(obj_array.obj_id(), obj_array.array_class_obj_id());
-                                }
-                            };
+                            obj_id_to_class_obj_id
+                                .insert(obj_array.obj_id(), obj_array.array_class_obj_id());
                         }
                         SubRecord::PrimitiveArray(pa) => {
                             prim_array_obj_id_to_type.insert(pa.obj_id(), pa.primitive_type());
@@ -67,12 +48,7 @@ pub fn dump_objects(hprof: &Hprof) {
             }
             RecordTag::Utf8 => {
                 let u = r.as_utf_8().unwrap().unwrap();
-                utf8.insert(
-                    u.name_id(),
-                    u.text_as_str()
-                        .map(|s| s.to_string())
-                        .unwrap_or(String::from("(invalid UTF-8)")),
-                );
+                utf8.insert(u.name_id(), u.text_as_str().unwrap_or("(invalid UTF-8)"));
             }
             RecordTag::LoadClass => {
                 let lc = r.as_load_class().unwrap().unwrap();
@@ -93,7 +69,27 @@ pub fn dump_objects(hprof: &Hprof) {
                     let s = p.unwrap();
 
                     match s {
-                        // TODO class - static fields
+                        SubRecord::Class(class) => {
+                            let mc = match classes.get(&class.obj_id()) {
+                                None => panic!("Could not find class {}", class.obj_id()),
+                                Some(c) => c,
+                            };
+
+                            println!("\nid {}: class {}", class.obj_id(), mc.name);
+                            for sf in &mc.static_fields {
+                                let field_name =
+                                    utf8.get(&sf.name_id()).unwrap_or_else(|| &missing_utf8);
+
+                                print_field_val(
+                                    &sf.value(),
+                                    field_name,
+                                    sf.field_type(),
+                                    &obj_id_to_class_obj_id,
+                                    &classes,
+                                    &prim_array_obj_id_to_type,
+                                );
+                            }
+                        }
                         SubRecord::Instance(instance) => {
                             let mc = match classes.get(&instance.class_obj_id()) {
                                 None => panic!(
@@ -104,7 +100,7 @@ pub fn dump_objects(hprof: &Hprof) {
                                 Some(c) => c,
                             };
 
-                            println!("id {}: {}", instance.obj_id(), mc.name);
+                            println!("\nid {}: {}", instance.obj_id(), mc.name);
 
                             let field_descriptors = class_instance_field_descriptors
                                 .get(&instance.class_obj_id())
@@ -118,126 +114,17 @@ pub fn dump_objects(hprof: &Hprof) {
                                     .unwrap();
                                 field_val_input = input;
 
-                                match field_val {
-                                    FieldValue::ObjectId(Some(field_ref_id)) => {
-                                        obj_id_to_class_obj_id
-                                            .get(&field_ref_id)
-                                            .map(|class_obj_id| {
-                                                println!(
-                                                    "  - {} = id {} (instance {})",
-                                                    utf8.get(&fd.name_id())
-                                                        .unwrap_or(&missing_utf8),
-                                                    field_ref_id,
-                                                    classes
-                                                        .get(class_obj_id)
-                                                        .map(|c| c.name.as_str())
-                                                        .unwrap_or("(class not found)"),
-                                                );
-                                            })
-                                            .or_else(|| {
-                                                prim_array_obj_id_to_type.get(&field_ref_id).map(
-                                                    |prim_type| {
-                                                        println!(
-                                                            "  - {} = id {} ({}[])",
-                                                            utf8.get(&fd.name_id())
-                                                                .unwrap_or(&missing_utf8),
-                                                            field_ref_id,
-                                                            prim_type.java_type_name()
-                                                        );
-                                                    },
-                                                )
-                                            })
-                                            .or_else(|| {
-                                                classes.get(&field_ref_id).map(|dest_class| {
-                                                    println!(
-                                                        "  - {} = id {} (class {})",
-                                                        utf8.get(&fd.name_id())
-                                                            .unwrap_or(&missing_utf8),
-                                                        field_ref_id,
-                                                        dest_class.name
-                                                    );
-                                                })
-                                            })
-                                            .unwrap_or_else(|| {
-                                                println!(
-                                                    "  - {} = id {} (type for obj id not found)",
-                                                    utf8.get(&fd.name_id())
-                                                        .unwrap_or(&missing_utf8),
-                                                    field_ref_id
-                                                );
-                                            });
-                                    }
-                                    FieldValue::ObjectId(None) => {
-                                        println!(
-                                            "  - {} = null",
-                                            utf8.get(&fd.name_id()).unwrap_or(&missing_utf8),
-                                        );
-                                    }
-                                    FieldValue::Boolean(v) => {
-                                        println!(
-                                            "  - {}: {} = {}",
-                                            utf8.get(&fd.name_id()).unwrap_or(&missing_utf8),
-                                            fd.field_type().java_type_name(),
-                                            v
-                                        );
-                                    }
-                                    FieldValue::Char(v) => {
-                                        println!(
-                                            "  - {}: {} = {}",
-                                            utf8.get(&fd.name_id()).unwrap_or(&missing_utf8),
-                                            fd.field_type().java_type_name(),
-                                            v
-                                        );
-                                    }
-                                    FieldValue::Float(v) => {
-                                        println!(
-                                            "  - {}: {} = {}",
-                                            utf8.get(&fd.name_id()).unwrap_or(&missing_utf8),
-                                            fd.field_type().java_type_name(),
-                                            v
-                                        );
-                                    }
-                                    FieldValue::Double(v) => {
-                                        println!(
-                                            "  - {}: {} = {}",
-                                            utf8.get(&fd.name_id()).unwrap_or(&missing_utf8),
-                                            fd.field_type().java_type_name(),
-                                            v
-                                        );
-                                    }
-                                    FieldValue::Byte(v) => {
-                                        println!(
-                                            "  - {}: {} = {}",
-                                            utf8.get(&fd.name_id()).unwrap_or(&missing_utf8),
-                                            fd.field_type().java_type_name(),
-                                            v
-                                        );
-                                    }
-                                    FieldValue::Short(v) => {
-                                        println!(
-                                            "  - {}: {} = {}",
-                                            utf8.get(&fd.name_id()).unwrap_or(&missing_utf8),
-                                            fd.field_type().java_type_name(),
-                                            v
-                                        );
-                                    }
-                                    FieldValue::Int(v) => {
-                                        println!(
-                                            "  - {}: {} = {}",
-                                            utf8.get(&fd.name_id()).unwrap_or(&missing_utf8),
-                                            fd.field_type().java_type_name(),
-                                            v
-                                        );
-                                    }
-                                    FieldValue::Long(v) => {
-                                        println!(
-                                            "  - {}: {} = {}",
-                                            utf8.get(&fd.name_id()).unwrap_or(&missing_utf8),
-                                            fd.field_type().java_type_name(),
-                                            v
-                                        );
-                                    }
-                                }
+                                let field_name =
+                                    utf8.get(&fd.name_id()).unwrap_or_else(|| &missing_utf8);
+
+                                print_field_val(
+                                    &field_val,
+                                    field_name,
+                                    fd.field_type(),
+                                    &obj_id_to_class_obj_id,
+                                    &classes,
+                                    &prim_array_obj_id_to_type,
+                                );
                             }
                         }
                         SubRecord::ObjectArray(oa) => {
@@ -250,16 +137,18 @@ pub fn dump_objects(hprof: &Hprof) {
                                 Some(c) => c,
                             };
 
-                            println!("id {}: {} = [", oa.obj_id(), mc.name);
+                            println!("\nid {}: {} = [", oa.obj_id(), mc.name);
 
                             for pr in oa.elements(hprof.header().id_size()) {
                                 match pr.unwrap() {
                                     Some(id) => {
-                                        println!(
-                                            "  - id {}: {}",
-                                            id,
-                                            classes.get(&oa.array_class_obj_id()).unwrap().name
-                                        );
+                                        let element_class_name = obj_id_to_class_obj_id
+                                            .get(&id)
+                                            .and_then(|class_id| classes.get(class_id))
+                                            .map(|c| c.name)
+                                            .unwrap_or_else(|| "(could not resolve class)");
+
+                                        println!("  - id {}: {}", id, element_class_name);
                                     }
                                     None => {
                                         println!("  - null");
@@ -271,7 +160,7 @@ pub fn dump_objects(hprof: &Hprof) {
                         }
                         SubRecord::PrimitiveArray(pa) => {
                             print!(
-                                "{}: {}[] = [",
+                                "\n{}: {}[] = [",
                                 pa.obj_id(),
                                 pa.primitive_type().java_type_name()
                             );
@@ -335,4 +224,124 @@ pub fn dump_objects(hprof: &Hprof) {
             }
             _ => {}
         });
+}
+
+fn print_field_val(
+    field_val: &FieldValue,
+    field_name: &str,
+    field_type: FieldType,
+    obj_id_to_class_obj_id: &collections::HashMap<Id, Id>,
+    classes: &collections::HashMap<Id, EzClass>,
+    prim_array_obj_id_to_type: &collections::HashMap<Id, PrimitiveArrayType>,
+) {
+    match field_val {
+        FieldValue::ObjectId(Some(field_ref_id)) => {
+            obj_id_to_class_obj_id
+                .get(&field_ref_id)
+                .map(|class_obj_id| {
+                    println!(
+                        "  - {} = id {} ({})",
+                        field_name,
+                        field_ref_id,
+                        classes
+                            .get(class_obj_id)
+                            .map(|c| c.name)
+                            .unwrap_or("(class not found)"),
+                    );
+                })
+                .or_else(|| {
+                    prim_array_obj_id_to_type
+                        .get(&field_ref_id)
+                        .map(|prim_type| {
+                            println!(
+                                "  - {} = id {} ({}[])",
+                                field_name,
+                                field_ref_id,
+                                prim_type.java_type_name()
+                            );
+                        })
+                })
+                .or_else(|| {
+                    classes.get(&field_ref_id).map(|dest_class| {
+                        println!(
+                            "  - {} = id {} (class {})",
+                            field_name, field_ref_id, dest_class.name
+                        );
+                    })
+                })
+                .unwrap_or_else(|| {
+                    println!(
+                        "  - {} = id {} (type for obj id not found)",
+                        field_name, field_ref_id
+                    );
+                });
+        }
+        FieldValue::ObjectId(None) => {
+            println!("  - {} = null", field_name,);
+        }
+        FieldValue::Boolean(v) => {
+            println!(
+                "  - {}: {} = {}",
+                field_name,
+                field_type.java_type_name(),
+                v
+            );
+        }
+        FieldValue::Char(v) => {
+            println!(
+                "  - {}: {} = {}",
+                field_name,
+                field_type.java_type_name(),
+                v
+            );
+        }
+        FieldValue::Float(v) => {
+            println!(
+                "  - {}: {} = {}",
+                field_name,
+                field_type.java_type_name(),
+                v
+            );
+        }
+        FieldValue::Double(v) => {
+            println!(
+                "  - {}: {} = {}",
+                field_name,
+                field_type.java_type_name(),
+                v
+            );
+        }
+        FieldValue::Byte(v) => {
+            println!(
+                "  - {}: {} = {}",
+                field_name,
+                field_type.java_type_name(),
+                v
+            );
+        }
+        FieldValue::Short(v) => {
+            println!(
+                "  - {}: {} = {}",
+                field_name,
+                field_type.java_type_name(),
+                v
+            );
+        }
+        FieldValue::Int(v) => {
+            println!(
+                "  - {}: {} = {}",
+                field_name,
+                field_type.java_type_name(),
+                v
+            );
+        }
+        FieldValue::Long(v) => {
+            println!(
+                "  - {}: {} = {}",
+                field_name,
+                field_type.java_type_name(),
+                v
+            );
+        }
+    }
 }

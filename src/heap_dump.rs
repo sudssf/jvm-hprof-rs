@@ -51,20 +51,6 @@ impl<'a> fmt::Debug for SubRecord<'a> {
 }
 
 impl<'a> SubRecord<'a> {
-    pub fn as_gc_root_unknown(&self) -> Option<GcRootUnknown> {
-        match self {
-            SubRecord::GcRootUnknown(v) => Some(*v),
-            _ => None,
-        }
-    }
-
-    pub fn as_class(&self) -> Option<&Class> {
-        match self {
-            SubRecord::Class(v) => Some(v),
-            _ => None,
-        }
-    }
-
     pub(crate) fn parse(input: &[u8], id_size: IdSize) -> nom::IResult<&[u8], SubRecord> {
         // https://github.com/openjdk/jdk/blob/08822b4e0526fe001c39fe08e241b849eddf481d/src/hotspot/share/services/heapDumper.cpp#L178
         let (input, tag_byte) = number::be_u8(input)?;
@@ -98,7 +84,7 @@ impl<'a> SubRecord<'a> {
                 .map(|(input, r)| (input, SubRecord::ObjectArray(r))),
             0x23 => PrimitiveArray::parse(input, id_size)
                 .map(|(input, r)| (input, SubRecord::PrimitiveArray(r))),
-            _ => panic!("Unexpected sub-record type {:#X}", tag_byte), // TODO
+            _ => panic!("Unexpected sub-record type {:#X}", tag_byte),
         }?;
 
         Ok((input, variant))
@@ -527,6 +513,8 @@ pub struct StaticFieldEntry {
     #[get_copy = "pub"]
     name_id: Id,
     #[get_copy = "pub"]
+    field_type: FieldType,
+    #[get_copy = "pub"]
     value: FieldValue,
 }
 
@@ -537,7 +525,14 @@ impl StatelessParserWithId for StaticFieldEntry {
         let (input, field_type) = FieldType::parse(input)?;
         let (input, value) = field_type.parse_value(input, id_size)?;
 
-        Ok((input, StaticFieldEntry { name_id, value }))
+        Ok((
+            input,
+            StaticFieldEntry {
+                name_id,
+                field_type,
+                value,
+            },
+        ))
     }
 }
 

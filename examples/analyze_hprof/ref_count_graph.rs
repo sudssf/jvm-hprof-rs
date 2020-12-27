@@ -25,13 +25,13 @@ pub fn ref_count_graph(hprof: &Hprof, output: &path::Path, min_edge_count: u64) 
     let mut gc_root_system_class_ids = collections::HashSet::<Id>::new();
     let mut gc_root_thread_block_ids = collections::HashSet::<Id>::new();
     let mut gc_root_busy_monitor_ids = collections::HashSet::<Id>::new();
-    let mut classes: collections::HashMap<Id, MiniClass> = collections::HashMap::new();
+    let mut classes: collections::HashMap<Id, EzClass> = collections::HashMap::new();
     // instance obj id to class obj id
     // TODO if this gets big, could use lmdb or similar to get it off-heap
     let mut obj_id_to_class_obj_id: collections::HashMap<Id, Id> = collections::HashMap::new();
     let mut prim_array_obj_id_to_type = collections::HashMap::new();
 
-    let missing_utf8 = String::from("(missing utf8)");
+    let missing_utf8 = "(missing utf8)";
 
     let mut instances = 0_u64;
     let mut object_arrays = 0_u64;
@@ -76,10 +76,8 @@ pub fn ref_count_graph(hprof: &Hprof, output: &path::Path, min_edge_count: u64) 
                             gc_root_busy_monitor_ids.insert(v.obj_id());
                         }
                         SubRecord::Class(c) => {
-                            classes.insert(
-                                c.obj_id(),
-                                MiniClass::from_class(&c, &load_classes, &utf8),
-                            );
+                            classes
+                                .insert(c.obj_id(), EzClass::from_class(&c, &load_classes, &utf8));
                         }
                         SubRecord::Instance(instance) => {
                             instances += 1;
@@ -120,13 +118,7 @@ pub fn ref_count_graph(hprof: &Hprof, output: &path::Path, min_edge_count: u64) 
             }
             RecordTag::Utf8 => {
                 let u = r.as_utf_8().unwrap().unwrap();
-                // TODO lifetimes -- nice to not allocate here
-                utf8.insert(
-                    u.name_id(),
-                    u.text_as_str()
-                        .map(|s| s.to_string())
-                        .unwrap_or(String::from("(invalid UTF-8)")),
-                );
+                utf8.insert(u.name_id(), u.text_as_str().unwrap_or("(invalid UTF-8)"));
             }
             RecordTag::LoadClass => {
                 let lc = r.as_load_class().unwrap().unwrap();

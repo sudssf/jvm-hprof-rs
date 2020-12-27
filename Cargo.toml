@@ -12,6 +12,8 @@ repository = "https://bitbucket.org/marshallpierce/jvm-hprof-rs/src/master/"
 [dependencies]
 nom = "5.0.1"
 getset = "0.0.9"
+strum_macros = "0.20.1"
+strum = "0.20.0"
 
 [dev-dependencies]
 memmap = "0.7.0"
@@ -20,6 +22,15 @@ itertools = "0.8.2"
 base64 = "0.11.0"
 clap = "2.33.0"
 escaper = "0.1.0"
+csv = "1.1.5"
+anyhow = "1.0.36"
+rayon = "1.5.0"
+# heap profiling
+#dhat = "0.2.1"
 
 [[example]]
 name = "analyze_hprof"
+
+[profile.release]
+# for dhat
+#debug = 1

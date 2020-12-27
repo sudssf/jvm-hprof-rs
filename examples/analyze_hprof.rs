@@ -1,13 +1,19 @@
+use anyhow;
 use base64;
 use chrono;
 use chrono::offset::TimeZone;
 use clap;
+use csv;
+use rayon;
+use strum;
+
 use itertools::Itertools;
+use strum::IntoEnumIterator;
 
 use jvm_hprof::heap_dump::SubRecord;
 use jvm_hprof::{Hprof, RecordTag};
 use memmap;
-use std::{collections, fs, path};
+use std::{collections, fs, io, path};
 
 #[path = "analyze_hprof/class_hierarchy_dot.rs"]
 mod class_hierarchy_dot;
@@ -20,36 +26,58 @@ mod ref_count_graph;
 #[path = "analyze_hprof/util.rs"]
 mod util;
 
+#[path = "analyze_hprof/instance_counts.rs"]
+mod instance_counts;
+
 use util::*;
 
-fn main() {
+fn main() -> Result<(), anyhow::Error> {
     let app = clap::App::new("Analyze hprof")
         .arg(
             clap::Arg::with_name("file")
                 .short("f")
                 .long("file")
                 .required(true)
-                .takes_value(true),
+                .takes_value(true)
+                .help("Heap dump file to read"),
         )
-        .subcommand(clap::SubCommand::with_name("header"))
-        .subcommand(clap::SubCommand::with_name("tag-counts"))
-        .subcommand(clap::SubCommand::with_name("dump-utf8"))
-        .subcommand(clap::SubCommand::with_name("dump-load-class"))
-        .subcommand(clap::SubCommand::with_name("dump-stack-trace"))
-        .subcommand(clap::SubCommand::with_name("dump-classes"))
-        .subcommand(clap::SubCommand::with_name("dump-objects"))
+        .arg(
+            clap::Arg::with_name("threads")
+                .short("t")
+                .long("threads")
+                .required(false)
+                .takes_value(true)
+                .help("Number of threads to use, if subcommand is multithreaded. If not specified, the pool will use the number of logical cores."),
+        )
+        .subcommand(clap::SubCommand::with_name("header")
+            .about("Display metadata from the hprof header"))
+        .subcommand(clap::SubCommand::with_name("record-counts")
+            .about("Display the number of each of the top level hprof record types"))
+        .subcommand(clap::SubCommand::with_name("dump-utf8")
+            .about("Display Utf8 records as CSV"))
+        .subcommand(clap::SubCommand::with_name("dump-load-class")
+            .about("Display LoadClass records as CSV"))
+        .subcommand(clap::SubCommand::with_name("dump-stack-trace")
+            .about("Display StackTrace records"))
+        .subcommand(clap::SubCommand::with_name("dump-classes")
+            .about("Display Class heap dump subrecords"))
+        .subcommand(clap::SubCommand::with_name("dump-objects")
+            .about("Display Object (and other associated) heap dump subrecords"))
         .subcommand(
-            clap::SubCommand::with_name("class-hierarchy").arg(
-                clap::Arg::with_name("output")
-                    .short("o")
-                    .long("output")
-                    .help("path to output dot file")
-                    .required(true)
-                    .takes_value(true),
-            ),
+            clap::SubCommand::with_name("class-hierarchy")
+                .about("Generate a GraphViz dot file of class hierarchy")
+                .arg(
+                    clap::Arg::with_name("output")
+                        .short("o")
+                        .long("output")
+                        .help("path to output dot file")
+                        .required(true)
+                        .takes_value(true),
+                ),
         )
         .subcommand(
             clap::SubCommand::with_name("ref-count-graph")
+                .about("Generate a GraphViz dot file of class fields to what types are pointed to by those fields")
                 .arg(
                     clap::Arg::with_name("output")
                         .short("o")
@@ -61,12 +89,14 @@ fn main() {
                 .arg(
                     clap::Arg::with_name("min-edge-count")
                         .long("min-edge-count")
-                        .help("minimum count for an edge to be included")
+                        .help("minimum count for an edge to be included -- useful to filter down an overly busy graph")
                         .required(false)
                         .default_value("1")
                         .takes_value(true),
                 ),
-        );
+        )
+        .subcommand(clap::SubCommand::with_name("instance-counts")
+            .about("Display the instance count for each class as CSV"));
     let matches = app.get_matches();
 
     let file_path = matches.value_of("file").expect("file must be specified");
@@ -77,11 +107,19 @@ fn main() {
 
     let hprof = jvm_hprof::parse_hprof(&memmap[..]).unwrap();
 
+    for s in matches.value_of("threads") {
+        // if specified, configure global thread pool
+        let t = s.parse::<usize>()?;
+        rayon::ThreadPoolBuilder::new()
+            .num_threads(t)
+            .build_global()?;
+    }
+
     match matches.subcommand() {
         ("header", _) => header(&hprof),
-        ("tag-counts", _) => tag_counts(&hprof),
-        ("dump-utf8", _) => dump_utf8(&hprof),
-        ("dump-load-class", _) => dump_load_class(&hprof),
+        ("record-counts", _) => record_counts(&hprof),
+        ("dump-utf8", _) => dump_utf8(&hprof)?,
+        ("dump-load-class", _) => dump_load_class(&hprof)?,
         ("dump-stack-trace", _) => dump_stack_trace(&hprof),
         ("dump-classes", _) => dump_classes(&hprof),
         ("dump-objects", _) => dump_objects::dump_objects(&hprof),
@@ -107,8 +145,11 @@ fn main() {
                     .expect("must provide output path"),
             )
         }
+        ("instance-counts", _) => instance_counts::instance_counts(&hprof)?,
         _ => panic!("Unknown subcommand"),
     };
+
+    Ok(())
 }
 
 fn header(hprof: &Hprof) {
@@ -118,8 +159,14 @@ fn header(hprof: &Hprof) {
     println!("Timestamp: {}", ts);
 }
 
-fn tag_counts(hprof: &Hprof) {
-    let mut tag_counts: Vec<(RecordTag, usize)> = hprof
+fn record_counts(hprof: &Hprof) {
+    // start with zero counts for all types
+    let mut counts = RecordTag::iter()
+        .map(|r| (r, 0_u64))
+        .collect::<collections::HashMap<_, _>>();
+
+    // overwrite zeros with real counts, if any
+    hprof
         .records_iter()
         .map(|r| r.unwrap())
         // sort first because group_by only groups contiguous runs
@@ -127,8 +174,14 @@ fn tag_counts(hprof: &Hprof) {
         .group_by(|r| r.tag())
         .into_iter()
         .map(|(tag, group)| (tag, group.count()))
+        .for_each(|(r, count)| {
+            counts.insert(r, count as u64);
+        });
+
+    let mut tag_counts: Vec<(RecordTag, u64)> = counts
+        .into_iter()
         .sorted_by_key(|&(_, count)| count)
-        .collect::<Vec<(jvm_hprof::RecordTag, usize)>>();
+        .collect::<Vec<(jvm_hprof::RecordTag, u64)>>();
 
     // highest count on top
     tag_counts.reverse();
@@ -138,44 +191,68 @@ fn tag_counts(hprof: &Hprof) {
     }
 }
 
-fn dump_utf8(hprof: &Hprof) {
-    hprof
+fn dump_utf8(hprof: &Hprof) -> Result<(), anyhow::Error> {
+    let mut wtr = csv::Writer::from_writer(io::stdout());
+    wtr.write_record(&[
+        "Name id",
+        "Contents (valid utf8)",
+        "Error (if invalid utf-8)",
+        "Contents (base64 of invalid utf8)",
+    ])?;
+
+    for u in hprof
         .records_iter()
         .map(|r| r.unwrap())
         .filter(|r| r.tag() == jvm_hprof::RecordTag::Utf8)
         .map(|r| r.as_utf_8().unwrap().unwrap())
-        .for_each(|u| match u.text_as_str() {
-            Ok(s) => println!("name id {} -> {:?}", u.name_id(), s),
-            Err(e) => {
-                eprintln!(
-                    "name id {} parse error {:?} - base64 of invalid utf8: {}",
-                    u.name_id(),
-                    e,
-                    base64::encode(u.text())
-                );
-            }
-        });
+    {
+        match u.text_as_str() {
+            Ok(s) => wtr.write_record(&[
+                format!("{}", u.name_id()),
+                s.to_string(),
+                String::from(""),
+                String::from(""),
+            ]),
+            Err(e) => wtr.write_record(&[
+                format!("{}", u.name_id()),
+                String::from(""),
+                format!("{:?}", e),
+                base64::encode(u.text()),
+            ]),
+        }?;
+    }
+
+    Ok(())
 }
 
-fn dump_load_class(hprof: &Hprof) {
+fn dump_load_class(hprof: &Hprof) -> Result<(), anyhow::Error> {
     let utf8 = utf8_by_id(hprof);
 
-    hprof
+    let mut wtr = csv::Writer::from_writer(io::stdout());
+    wtr.write_record(&[
+        "Class serial",
+        "Class obj id",
+        "Stack trace serial",
+        "Class name id",
+        "Class name",
+    ])?;
+
+    for l in hprof
         .records_iter()
         .map(|r| r.unwrap())
         .filter(|r| r.tag() == RecordTag::LoadClass)
         .map(|r| r.as_load_class().unwrap().unwrap())
-        .for_each(|l| {
-            println!("Class serial: {}", l.class_serial());
-            println!("Class obj id: {}", l.class_obj_id());
-            println!("Stack trace serial: {}", l.stack_trace_serial());
-            println!(
-                "Class name id: {} -> {}",
-                l.class_name_id(),
-                get_utf8_if_available(&utf8, l.class_name_id())
-            );
-            println!();
-        })
+    {
+        wtr.write_record(&[
+            format!("{}", l.class_serial()),
+            format!("{}", l.class_obj_id()),
+            format!("{}", l.stack_trace_serial()),
+            format!("{}", l.class_name_id()),
+            get_utf8_if_available(&utf8, l.class_name_id()).to_string(),
+        ])?;
+    }
+
+    Ok(())
 }
 
 fn dump_stack_trace(hprof: &Hprof) {
@@ -237,12 +314,10 @@ fn dump_classes(hprof: &Hprof) {
                 let s = p.unwrap();
 
                 match s {
-                    SubRecord::Class(_) => {
-                        let class = s.as_class().unwrap();
-
+                    SubRecord::Class(class) => {
                         println!("Obj id: {:#018X} = {}", class.obj_id(), class.obj_id());
                         println!(
-                            "\tName (via LoadClass): {}",
+                            "Name (via LoadClass): {}",
                             load_classes_by_obj_id
                                 .get(&class.obj_id())
                                 .map(|lc| get_utf8_if_available(&utf8, lc.class_name_id()))

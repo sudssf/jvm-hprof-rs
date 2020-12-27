@@ -1,24 +1,28 @@
 use jvm_hprof::{heap_dump::*, *};
 use std::collections;
 
-// TODO need to figure out lifetimes so I can just keep the original Class with its slice
-pub struct MiniClass {
+/// A somewhat more convenient representation of a Class together with its name from the corresponding LoadClass
+pub struct EzClass<'a> {
     pub obj_id: Id,
     pub super_class_obj_id: Option<Id>,
     pub static_fields: Vec<StaticFieldEntry>,
     /// Just the instance fields for this class, not including superclasses
     pub instance_field_descriptors: Vec<FieldDescriptor>,
-    pub name: String,
+    pub name: &'a str,
     pub instance_size_bytes: u32,
 }
 
-impl MiniClass {
-    pub(crate) fn from_class(
+impl<'a> EzClass<'a> {
+    pub(crate) fn from_class<'i>(
         c: &Class,
-        load_classes: &collections::HashMap<Id, LoadClass>,
-        utf8: &collections::HashMap<Id, String>,
-    ) -> MiniClass {
-        MiniClass {
+        load_classes: &'i collections::HashMap<Id, LoadClass>,
+        utf8: &'i collections::HashMap<Id, &'a str>,
+    ) -> EzClass<'a>
+    // input collections maybe shorter lived than the str data they represent
+    where
+        'a: 'i,
+    {
+        EzClass {
             obj_id: c.obj_id(),
             super_class_obj_id: c.super_class_obj_id(),
             static_fields: c.static_fields().map(|r| r.unwrap()).collect(),
@@ -30,7 +34,7 @@ impl MiniClass {
                 .get(&c.obj_id())
                 .and_then(|lc: &LoadClass| utf8.get(&lc.class_name_id()))
                 .map(|s| s.to_owned())
-                .unwrap_or_else(|| String::from("missing LoadClass")),
+                .unwrap_or_else(|| "missing LoadClass"),
             instance_size_bytes: c.instance_size_bytes(),
         }
     }
@@ -46,7 +50,7 @@ pub fn utf8_by_id<'a>(hprof: &'a Hprof) -> collections::HashMap<Id, Utf8<'a>> {
         .collect::<collections::HashMap<_, _>>()
 }
 
-pub fn utf8_strings_by_id(hprof: &Hprof) -> collections::HashMap<Id, String> {
+pub fn utf8_strings_by_id<'a>(hprof: &'a Hprof) -> collections::HashMap<Id, &'a str> {
     hprof
         .records_iter()
         .map(|r| r.unwrap())
@@ -55,9 +59,7 @@ pub fn utf8_strings_by_id(hprof: &Hprof) -> collections::HashMap<Id, String> {
         .map(|u| {
             (
                 u.name_id(),
-                u.text_as_str()
-                    .map(|s| s.to_string())
-                    .unwrap_or_else(|_| String::from("(invalid UTF-8)")),
+                u.text_as_str().unwrap_or_else(|_| "(invalid UTF-8)"),
             )
         })
         .collect::<collections::HashMap<_, _>>()
@@ -94,7 +96,7 @@ pub fn get_utf8_if_available<'a>(utf8: &'a collections::HashMap<Id, Utf8<'a>>, i
 /// Classes are not laid down super class first, so have to wait until the end to be able to
 /// navigate the class hierarchy
 pub fn build_type_hierarchy_field_descriptors(
-    classes: &collections::HashMap<Id, MiniClass>,
+    classes: &collections::HashMap<Id, EzClass>,
 ) -> collections::HashMap<Id, Vec<FieldDescriptor>> {
     // class obj id => vec of all instance field descriptors (the class, then super class, then ...)
     let mut class_instance_field_descriptors = collections::HashMap::new();

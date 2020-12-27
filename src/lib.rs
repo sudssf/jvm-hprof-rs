@@ -4,6 +4,8 @@ use nom::number::complete as number;
 use std::cmp::Ordering;
 use std::fmt::{Error, Formatter};
 use std::{cmp, fmt};
+use strum_macros;
+use strum_macros::EnumIter;
 
 pub mod heap_dump;
 mod parsing_iterator;
@@ -229,7 +231,7 @@ impl<'a> Record<'a> {
             0x0E => RecordTag::ControlSettings,
             0x1C => RecordTag::HeapDumpSegment,
             0x2C => RecordTag::HeapDumpEnd,
-            _ => panic!("unexpected tag: {:#X?}", tag_byte[0]), // TODO
+            _ => panic!("unexpected tag: {:#X?}", tag_byte[0]),
         };
 
         let (input, micros) = number::be_u32(input)?;
@@ -248,7 +250,8 @@ impl<'a> Record<'a> {
     }
 }
 
-#[derive(Debug, Copy, Clone, PartialEq, Eq, PartialOrd)]
+// Since this enum has no data, add EnumIter to allow enumerating across the variants
+#[derive(Debug, Copy, Clone, PartialEq, Eq, PartialOrd, Hash, EnumIter)]
 pub enum RecordTag {
     Utf8,
     LoadClass,
