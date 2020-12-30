@@ -34,16 +34,20 @@ impl<'a> PrimitiveArray<'a> {
         let (input, num_elements) = number::be_u32(input)?;
         let (input, type_byte) = number::be_u8(input)?;
 
-        let (array_type, size) = match type_byte {
-            0x04 => (PrimitiveArrayType::Boolean, 1),
-            0x05 => (PrimitiveArrayType::Char, 2),
-            0x06 => (PrimitiveArrayType::Float, 4),
-            0x07 => (PrimitiveArrayType::Double, 8),
-            0x08 => (PrimitiveArrayType::Byte, 1),
-            0x09 => (PrimitiveArrayType::Short, 2),
-            0x0A => (PrimitiveArrayType::Int, 4),
-            0x0B => (PrimitiveArrayType::Long, 8),
-            _ => panic!("Unexpected primitive array type {:#X}", type_byte),
+        let array_type = match PrimitiveArrayType::from_type_code(type_byte) {
+            Some(t) => t,
+            None => panic!("Unexpected primitive array type {:#X}", type_byte),
+        };
+
+        let size: u32 = match array_type {
+            PrimitiveArrayType::Boolean => 1,
+            PrimitiveArrayType::Char => 2,
+            PrimitiveArrayType::Float => 4,
+            PrimitiveArrayType::Double => 8,
+            PrimitiveArrayType::Byte => 1,
+            PrimitiveArrayType::Short => 2,
+            PrimitiveArrayType::Int => 4,
+            PrimitiveArrayType::Long => 8,
         };
 
         let (input, contents) = bytes::take(num_elements * size)(input)?;
@@ -142,6 +146,39 @@ impl PrimitiveArrayType {
             PrimitiveArrayType::Short => "short",
             PrimitiveArrayType::Int => "int",
             PrimitiveArrayType::Long => "long",
+        }
+    }
+
+    /// Returns the hprof type code for the array type
+    ///
+    /// See https://github.com/openjdk/jdk/blob/08822b4e0526fe001c39fe08e241b849eddf481d/src/hotspot/share/services/heapDumper.cpp#L279
+    pub fn type_code(&self) -> u8 {
+        match self {
+            PrimitiveArrayType::Boolean => 0x04,
+            PrimitiveArrayType::Char => 0x05,
+            PrimitiveArrayType::Float => 0x06,
+            PrimitiveArrayType::Double => 0x07,
+            PrimitiveArrayType::Byte => 0x08,
+            PrimitiveArrayType::Short => 0x09,
+            PrimitiveArrayType::Int => 0x0A,
+            PrimitiveArrayType::Long => 0x0B,
+        }
+    }
+
+    /// Returns the type for the type code, or None if the code is unknown.
+    ///
+    /// See https://github.com/openjdk/jdk/blob/08822b4e0526fe001c39fe08e241b849eddf481d/src/hotspot/share/services/heapDumper.cpp#L279
+    pub fn from_type_code(type_byte: u8) -> Option<PrimitiveArrayType> {
+        match type_byte {
+            0x04 => Some(PrimitiveArrayType::Boolean),
+            0x05 => Some(PrimitiveArrayType::Char),
+            0x06 => Some(PrimitiveArrayType::Float),
+            0x07 => Some(PrimitiveArrayType::Double),
+            0x08 => Some(PrimitiveArrayType::Byte),
+            0x09 => Some(PrimitiveArrayType::Short),
+            0x0A => Some(PrimitiveArrayType::Int),
+            0x0B => Some(PrimitiveArrayType::Long),
+            _ => None,
         }
     }
 }

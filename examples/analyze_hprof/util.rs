@@ -1,5 +1,6 @@
 use jvm_hprof::{heap_dump::*, *};
 use std::collections;
+use strum::IntoEnumIterator;
 
 /// A somewhat more convenient representation of a Class together with its name from the corresponding LoadClass
 pub struct EzClass<'a> {
@@ -89,6 +90,24 @@ pub fn get_utf8_if_available<'a>(utf8: &'a collections::HashMap<Id, Utf8<'a>>, i
     utf8.get(&id)
         .map(|u| u.text_as_str().unwrap_or("(invalid utf8)"))
         .unwrap_or("(utf8 not found)")
+}
+
+/// Counts for each record tag, with zero-count entries for missing tags.
+pub fn record_counts(hprof: &Hprof) -> collections::HashMap<RecordTag, u64> {
+    // start with zero counts for all types
+    let mut counts = RecordTag::iter()
+        .map(|r| (r, 0_u64))
+        .collect::<collections::HashMap<_, _>>();
+
+    // overwrite zeros with real counts, if any
+    hprof
+        .records_iter()
+        .map(|r| r.unwrap().tag())
+        .for_each(|tag| {
+            counts.entry(tag).and_modify(|c| *c += 1).or_insert(1);
+        });
+
+    counts
 }
 
 /// Walk the class hierarchy and build a per-class list of field descriptors, root type's fields last.

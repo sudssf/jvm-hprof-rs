@@ -19,6 +19,12 @@ pub struct Id {
     id: u64,
 }
 
+impl From<u64> for Id {
+    fn from(id: u64) -> Id {
+        Id { id }
+    }
+}
+
 impl fmt::Display for Id {
     fn fmt(&self, f: &mut Formatter<'_>) -> Result<(), Error> {
         write!(f, "{}", self.id)
@@ -40,7 +46,7 @@ impl StatelessParserWithId for Id {
             IdSize::U64 => number::be_u64(input)?,
         };
 
-        Ok((input, Id { id }))
+        Ok((input, Id::from(id)))
     }
 }
 

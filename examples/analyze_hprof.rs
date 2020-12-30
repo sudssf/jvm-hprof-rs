@@ -4,15 +4,13 @@ use chrono;
 use chrono::offset::TimeZone;
 use clap;
 use csv;
+use memmap;
+use num_cpus;
 use rayon;
-use strum;
 
 use itertools::Itertools;
-use strum::IntoEnumIterator;
-
 use jvm_hprof::heap_dump::SubRecord;
 use jvm_hprof::{Hprof, RecordTag};
-use memmap;
 use std::{collections, fs, io, path};
 
 #[path = "analyze_hprof/class_hierarchy_dot.rs"]
@@ -28,7 +26,10 @@ mod util;
 
 #[path = "analyze_hprof/instance_counts.rs"]
 mod instance_counts;
+#[path = "analyze_hprof/obj_class_index.rs"]
+mod obj_class_index;
 
+use crate::obj_class_index::{HprofFingerprint, ObjClassIndex, SledIndex};
 use util::*;
 
 fn main() -> Result<(), anyhow::Error> {
@@ -47,7 +48,7 @@ fn main() -> Result<(), anyhow::Error> {
                 .long("threads")
                 .required(false)
                 .takes_value(true)
-                .help("Number of threads to use, if subcommand is multithreaded. If not specified, the pool will use the number of logical cores."),
+                .help("Number of threads to use, if subcommand is multithreaded. Defaults to 4 or the number of cores, whichever is smaller."),
         )
         .subcommand(clap::SubCommand::with_name("header")
             .about("Display metadata from the hprof header"))
@@ -79,6 +80,14 @@ fn main() -> Result<(), anyhow::Error> {
             clap::SubCommand::with_name("ref-count-graph")
                 .about("Generate a GraphViz dot file of class fields to what types are pointed to by those fields")
                 .arg(
+                    clap::Arg::with_name("index")
+                        .short("i")
+                        .long("index")
+                        .help("path index for the hprof file (created with the obj-class-index subcommand)")
+                        .required(true)
+                        .takes_value(true),
+                )
+                .arg(
                     clap::Arg::with_name("output")
                         .short("o")
                         .long("output")
@@ -96,7 +105,15 @@ fn main() -> Result<(), anyhow::Error> {
                 ),
         )
         .subcommand(clap::SubCommand::with_name("instance-counts")
-            .about("Display the instance count for each class as CSV"));
+            .about("Display the instance count for each class as CSV"))
+        .subcommand(clap::SubCommand::with_name("obj-class-index")
+            .about("Build an index on disk for subsequent use with other commands")
+            .arg(clap::Arg::with_name("output")
+                .short("o")
+                .long("output")
+                .help("path to output index at")
+                .required(true)
+                .takes_value(true)));
     let matches = app.get_matches();
 
     let file_path = matches.value_of("file").expect("file must be specified");
@@ -107,17 +124,25 @@ fn main() -> Result<(), anyhow::Error> {
 
     let hprof = jvm_hprof::parse_hprof(&memmap[..]).unwrap();
 
-    for s in matches.value_of("threads") {
-        // if specified, configure global thread pool
-        let t = s.parse::<usize>()?;
-        rayon::ThreadPoolBuilder::new()
-            .num_threads(t)
-            .build_global()?;
-    }
+    let threads = matches
+        .value_of("threads")
+        .map(|s| s.parse::<usize>())
+        .transpose()?
+        .unwrap_or_else(|| {
+            let cores = num_cpus::get();
+
+            // 4 is a reasonable default because most systems probably don't have fast enough
+            // storage to be able to keep all their cores busy
+            std::cmp::min(cores, 4)
+        });
+
+    rayon::ThreadPoolBuilder::new()
+        .num_threads(threads)
+        .build_global()?;
 
     match matches.subcommand() {
         ("header", _) => header(&hprof),
-        ("record-counts", _) => record_counts(&hprof),
+        ("record-counts", _) => dump_record_counts(&hprof),
         ("dump-utf8", _) => dump_utf8(&hprof)?,
         ("dump-load-class", _) => dump_load_class(&hprof)?,
         ("dump-stack-trace", _) => dump_stack_trace(&hprof),
@@ -133,19 +158,36 @@ fn main() -> Result<(), anyhow::Error> {
         ),
         ("ref-count-graph", arg_matches) => {
             let matches = arg_matches.expect("must provide args");
-            ref_count_graph::ref_count_graph(
+            let index = matches
+                .value_of("index")
+                .map(|s| {
+                    SledIndex::open_with_fingerprint(
+                        &HprofFingerprint::from_hprof(&hprof),
+                        path::Path::new(s),
+                    )
+                })
+                .unwrap()?;
+            let min_edge_count = matches
+                .value_of("min-edge-count")
+                .map(|s| s.parse::<u64>().unwrap())
+                .unwrap();
+            let output = matches
+                .value_of("output")
+                .map(|s| path::Path::new(s))
+                .unwrap();
+            ref_count_graph::ref_count_graph(&hprof, &index, output, min_edge_count)
+        }
+        ("instance-counts", _) => instance_counts::instance_counts(&hprof)?,
+        ("obj-class-index", arg_matches) => {
+            obj_class_index::build_index::<obj_class_index::SledIndex>(
                 &hprof,
-                matches
+                arg_matches
+                    .expect("must provide args")
                     .value_of("output")
                     .map(|s| path::Path::new(s))
                     .expect("must provide output path"),
-                matches
-                    .value_of("min-edge-count")
-                    .map(|s| s.parse::<u64>().unwrap())
-                    .expect("must provide output path"),
-            )
+            )?
         }
-        ("instance-counts", _) => instance_counts::instance_counts(&hprof)?,
         _ => panic!("Unknown subcommand"),
     };
 
@@ -159,24 +201,8 @@ fn header(hprof: &Hprof) {
     println!("Timestamp: {}", ts);
 }
 
-fn record_counts(hprof: &Hprof) {
-    // start with zero counts for all types
-    let mut counts = RecordTag::iter()
-        .map(|r| (r, 0_u64))
-        .collect::<collections::HashMap<_, _>>();
-
-    // overwrite zeros with real counts, if any
-    hprof
-        .records_iter()
-        .map(|r| r.unwrap())
-        // sort first because group_by only groups contiguous runs
-        .sorted_by_key(|r| r.tag())
-        .group_by(|r| r.tag())
-        .into_iter()
-        .map(|(tag, group)| (tag, group.count()))
-        .for_each(|(r, count)| {
-            counts.insert(r, count as u64);
-        });
+fn dump_record_counts(hprof: &Hprof) {
+    let counts = record_counts(hprof);
 
     let mut tag_counts: Vec<(RecordTag, u64)> = counts
         .into_iter()

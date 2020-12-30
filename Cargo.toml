@@ -10,8 +10,11 @@ categories = ["development-tools", "parser-implementations"]
 repository = "https://bitbucket.org/marshallpierce/jvm-hprof-rs/src/master/"
 
 [dependencies]
+# parsing
 nom = "5.0.1"
+# generate getters
 getset = "0.0.9"
+# iterating over enum variants
 strum_macros = "0.20.1"
 strum = "0.20.0"
 
@@ -25,6 +28,12 @@ escaper = "0.1.0"
 csv = "1.1.5"
 anyhow = "1.0.36"
 rayon = "1.5.0"
+num_cpus = "1.13.0"
+
+# index
+sled = "0.34.6"
+lmdb-rkv = "0.14.0"
+
 # heap profiling
 #dhat = "0.2.1"
 
