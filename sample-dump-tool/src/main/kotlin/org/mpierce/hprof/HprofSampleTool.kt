@@ -6,6 +6,10 @@ import com.sun.management.HotSpotDiagnosticMXBean
 import java.lang.management.ManagementFactory
 import java.nio.file.Paths
 import java.time.Instant
+import java.util.LinkedList
+import java.util.TreeSet
+import java.util.concurrent.ConcurrentSkipListSet
+import java.util.concurrent.CopyOnWriteArrayList
 
 
 object HprofSampleTool {
@@ -16,7 +20,8 @@ object HprofSampleTool {
                 subcommands(
                     StartupHeap(),
                     PrimitiveArrays(),
-                    Superclasses()
+                    Superclasses(),
+                    Collections()
                 )
             }
 
@@ -65,6 +70,27 @@ class Superclasses : CliktCommand() {
 
         println("dumped ${objects.size} top level objects")
     }
+}
+
+class Collections: CliktCommand() {
+    override fun run() {
+        fun strings(count: Int) = (0 until count).map(Int::toString)
+
+        val collections = listOf(
+            HashSet(strings(50)),
+            LinkedHashSet(strings(100)),
+            ConcurrentSkipListSet(strings(200)),
+            TreeSet(strings(500)),
+            CopyOnWriteArrayList(strings(1_000)),
+            ArrayList(strings(2_000)),
+            LinkedList(strings(100_000))
+        )
+
+        dumpHeap("collections")
+
+        println("dumped ${collections.size} different collections of strings")
+    }
+
 }
 
 fun dumpHeap(prefix: String) {
