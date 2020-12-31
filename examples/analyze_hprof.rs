@@ -24,12 +24,12 @@ mod ref_count_graph;
 #[path = "analyze_hprof/util.rs"]
 mod util;
 
+#[path = "analyze_hprof/index/mod.rs"]
+mod index;
 #[path = "analyze_hprof/instance_counts.rs"]
 mod instance_counts;
-#[path = "analyze_hprof/obj_class_index.rs"]
-mod obj_class_index;
 
-use crate::obj_class_index::{HprofFingerprint, Index, LmdbIndex};
+use crate::index::{lmdb::LmdbIndex, HprofFingerprint, Index};
 use util::*;
 
 fn main() -> Result<(), anyhow::Error> {
@@ -178,7 +178,7 @@ fn main() -> Result<(), anyhow::Error> {
             ref_count_graph::ref_count_graph(&hprof, &index, output, min_edge_count)
         }
         ("instance-counts", _) => instance_counts::instance_counts(&hprof)?,
-        ("build-index", arg_matches) => obj_class_index::build_index(
+        ("build-index", arg_matches) => index::build_index(
             &hprof,
             arg_matches
                 .expect("must provide args")

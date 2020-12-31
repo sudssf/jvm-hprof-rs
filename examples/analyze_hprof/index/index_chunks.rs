@@ -1,4 +1,5 @@
 use super::*;
+use std::convert::TryInto;
 use std::{fs, io, marker, path};
 
 /// An IndexBuilder that delegates to ChunkedrecordWriter for the actual work
@@ -8,7 +9,7 @@ pub(crate) struct ChunkedIndexBuilder {
 }
 
 impl IndexBuilder for ChunkedIndexBuilder {
-    type RecWriter = ChunkedRecordWriter<DirWriterFactory, U64PairHandler, U64PrimTypeHandler>;
+    type RecWriter = ChunkedRecordWriter<DirWriterFactory, U64PairData, U64U8Data>;
 
     fn new_with_fingerprint(
         fingerprint: HprofFingerprint,
@@ -38,14 +39,14 @@ impl IndexBuilder for ChunkedIndexBuilder {
                 // 8M * 16 = 128MiB chunks
                 8_000_000,
                 class_chunk_factory,
-                U64PairHandler,
+                U64PairData,
             ),
             obj_prim_array_type_chunk_writer: SortedChunkWriter::new(
                 record_index,
                 // 96MiB chunks
                 8_000_000,
                 prim_array_chunk_factory,
-                U64PrimTypeHandler,
+                U64U8Data,
             ),
         })
     }
@@ -60,9 +61,9 @@ pub(crate) struct ChunkedRecordWriter<F, D1, D2>
 where
     F: ChunkWriterFactory,
     // obj id -> class id
-    D1: DatumHandler<(u64, u64), F::Writer>,
+    D1: DatumSerializer<(u64, u64), F::Writer>,
     // obj id -> prim type
-    D2: DatumHandler<(u64, u8), F::Writer>,
+    D2: DatumSerializer<(u64, u8), F::Writer>,
 {
     obj_class_chunk_writer: SortedChunkWriter<F, (u64, u64), D1>,
     obj_prim_array_type_chunk_writer: SortedChunkWriter<F, (u64, u8), D2>,
@@ -71,8 +72,8 @@ where
 impl<F, D1, D2> RecordWriter for ChunkedRecordWriter<F, D1, D2>
 where
     F: ChunkWriterFactory,
-    D1: DatumHandler<(u64, u64), F::Writer>,
-    D2: DatumHandler<(u64, u8), F::Writer>,
+    D1: DatumSerializer<(u64, u64), F::Writer>,
+    D2: DatumSerializer<(u64, u8), F::Writer>,
 {
     fn insert_class_id(&mut self, obj_id: Id, class_id: Id) -> Result<(), anyhow::Error> {
         self.obj_class_chunk_writer
@@ -100,37 +101,34 @@ where
 
 /// Writes sorted chunks of a data stream so that they can be later merge-sorted into a unified,
 /// globally sorted iteration.
-struct SortedChunkWriter<F, T, D>
+struct SortedChunkWriter<F, T, S>
 where
     // builds per-chunk writers
     F: ChunkWriterFactory,
-    D: DatumHandler<T, F::Writer>,
+    S: DatumSerializer<T, F::Writer>,
 {
     data: Vec<T>,
     chunk_size: usize,
     record_index: usize,
     chunk_index: usize,
     writer_factory: F,
-    phantom: marker::PhantomData<D>,
+    serializer: S,
 }
 
-impl<F: ChunkWriterFactory, T, D: DatumHandler<T, F::Writer>> SortedChunkWriter<F, T, D> {
+impl<F: ChunkWriterFactory, T, S: DatumSerializer<T, F::Writer>> SortedChunkWriter<F, T, S> {
     fn new(
         record_index: usize,
         chunk_size: usize,
         writer_factory: F,
-        // so that you can pass the type you want to use without having to specify the whole
-        // generic signature
-        // TODO just use instance methods?
-        _handler: D,
-    ) -> SortedChunkWriter<F, T, D> {
+        serializer: S,
+    ) -> SortedChunkWriter<F, T, S> {
         SortedChunkWriter {
             data: Vec::new(),
             chunk_size,
             record_index,
             chunk_index: 0,
             writer_factory,
-            phantom: marker::PhantomData,
+            serializer,
         }
     }
 
@@ -153,15 +151,16 @@ impl<F: ChunkWriterFactory, T, D: DatumHandler<T, F::Writer>> SortedChunkWriter<
             return Ok(());
         }
 
+        let serializer = &self.serializer;
         self.data
-            .sort_unstable_by_key(|datum| D::extract_key(datum));
+            .sort_unstable_by_key(|datum| serializer.extract_key(datum));
 
         let mut writer = self
             .writer_factory
             .chunk_writer(self.record_index, self.chunk_index)?;
 
         for datum in self.data.iter() {
-            D::encode_and_write(datum, &mut writer)?;
+            self.serializer.serialize(datum, &mut writer)?;
         }
         writer.flush()?;
 
@@ -173,43 +172,89 @@ impl<F: ChunkWriterFactory, T, D: DatumHandler<T, F::Writer>> SortedChunkWriter<
 }
 
 /// The boring details of how a particular data type that we might write in chunks is to be encoded
-pub(crate) trait DatumHandler<T, W: io::Write> {
+pub(crate) trait DatumSerializer<T, W: io::Write> {
     type SortKey: Ord;
 
-    fn extract_key(datum: &T) -> Self::SortKey;
+    fn extract_key(&self, datum: &T) -> Self::SortKey;
 
-    fn encode_and_write(datum: &T, writer: &mut W) -> Result<(), io::Error>;
+    fn serialize(&self, datum: &T, writer: &mut W) -> Result<(), io::Error>;
 }
 
-pub(crate) struct U64PairHandler;
+pub(crate) trait DatumDeserializer<T, R: io::Read> {
+    fn deserialize(&self, reader: &mut R) -> Option<Result<T, io::Error>>;
+}
 
-impl<W: io::Write> DatumHandler<(u64, u64), W> for U64PairHandler {
+/// For (u64, u64)
+pub(crate) struct U64PairData;
+
+impl<W: io::Write> DatumSerializer<(u64, u64), W> for U64PairData {
     type SortKey = u64;
 
-    fn extract_key(datum: &(u64, u64)) -> Self::SortKey {
+    fn extract_key(&self, datum: &(u64, u64)) -> Self::SortKey {
         datum.0
     }
 
-    fn encode_and_write(datum: &(u64, u64), writer: &mut W) -> Result<(), io::Error> {
+    fn serialize(&self, datum: &(u64, u64), writer: &mut W) -> Result<(), io::Error> {
         writer
             .write_all(&datum.0.to_le_bytes())
             .and_then(|_| writer.write_all(&datum.1.to_le_bytes()))
     }
 }
 
-pub(crate) struct U64PrimTypeHandler;
+impl<R: io::Read> DatumDeserializer<(u64, u64), R> for U64PairData {
+    fn deserialize(&self, reader: &mut R) -> Option<Result<(u64, u64), Error>> {
+        let mut buf = [0_u8; 16];
+        match reader.read_exact(&mut buf[..]) {
+            Ok(_) => { /* no op */ }
+            Err(e) => {
+                return match e.kind() {
+                    // TODO error if there are leftover bytes
+                    io::ErrorKind::UnexpectedEof => None,
+                    _ => Some(Err(e)),
+                };
+            }
+        }
+        let key = u64::from_le_bytes(buf[0..8].try_into().unwrap());
+        let value = u64::from_le_bytes(buf[8..].try_into().unwrap());
 
-impl<W: io::Write> DatumHandler<(u64, u8), W> for U64PrimTypeHandler {
+        Some(Ok((key, value)))
+    }
+}
+
+/// For (u64, u8) as used for primitive array types, which use a u8 type code
+pub(crate) struct U64U8Data;
+
+impl<W: io::Write> DatumSerializer<(u64, u8), W> for U64U8Data {
     type SortKey = u64;
 
-    fn extract_key(datum: &(u64, u8)) -> Self::SortKey {
+    fn extract_key(&self, datum: &(u64, u8)) -> Self::SortKey {
         datum.0
     }
 
-    fn encode_and_write(datum: &(u64, u8), writer: &mut W) -> Result<(), io::Error> {
+    fn serialize(&self, datum: &(u64, u8), writer: &mut W) -> Result<(), io::Error> {
         writer
             .write_all(&datum.0.to_le_bytes())
             .and_then(|_| writer.write_all(&datum.1.to_le_bytes()))
+    }
+}
+
+impl<R: io::Read> DatumDeserializer<(u64, u8), R> for U64U8Data {
+    fn deserialize(&self, reader: &mut R) -> Option<Result<(u64, u8), Error>> {
+        let mut buf = [0_u8; 9];
+        match reader.read_exact(&mut buf[..]) {
+            Ok(_) => { /* no op */ }
+            Err(e) => {
+                return match e.kind() {
+                    // TODO error if there are leftover bytes
+                    io::ErrorKind::UnexpectedEof => None,
+                    _ => Some(Err(e)),
+                };
+            }
+        }
+        let key = u64::from_le_bytes(buf[0..8].try_into().unwrap());
+        let value = buf[8];
+
+        Some(Ok((key, value)))
     }
 }
 
@@ -257,10 +302,48 @@ impl ChunkWriterFactory for DirWriterFactory {
     }
 }
 
+struct ChunkDatumIterator<R: io::Read, T, D: DatumDeserializer<T, R>> {
+    reader: R,
+    deserializer: D,
+    done: bool,
+    phantom: marker::PhantomData<T>,
+}
+
+impl<R: io::Read, T, D: DatumDeserializer<T, R>> ChunkDatumIterator<R, T, D> {
+    fn new(reader: R, deserializer: D) -> ChunkDatumIterator<R, T, D> {
+        ChunkDatumIterator {
+            reader,
+            deserializer,
+            done: false,
+            phantom: marker::PhantomData,
+        }
+    }
+}
+
+impl<R: io::Read, T, D: DatumDeserializer<T, R>> Iterator for ChunkDatumIterator<R, T, D> {
+    type Item = Result<T, io::Error>;
+
+    fn next(&mut self) -> Option<Self::Item> {
+        if self.done {
+            return None;
+        }
+
+        match self.deserializer.deserialize(&mut self.reader) {
+            None => {
+                self.done = true;
+                None
+            }
+            Some(r) => Some(r),
+        }
+    }
+}
+
 #[cfg(test)]
 mod tests {
-    use super::{ChunkWriterFactory, SortedChunkWriter, U64PairHandler};
+    use super::{ChunkWriterFactory, SortedChunkWriter, U64PairData};
+    use crate::index::index_chunks::ChunkDatumIterator;
     use anyhow;
+    use itertools::Itertools;
     use std::convert::TryInto;
     use std::{cell, io, rc};
 
@@ -335,11 +418,38 @@ mod tests {
         Ok(())
     }
 
+    #[test]
+    fn write_chunks_then_read_them() -> Result<(), anyhow::Error> {
+        let mut stub_factory = StubChunkWriterFactory::new();
+        let mut chunk_writer = stub_pair_writer(&mut stub_factory, 100);
+
+        chunk_writer.append((1, 100))?;
+        chunk_writer.append((3, 300))?;
+        chunk_writer.append((2, 200))?;
+
+        chunk_writer.flush()?;
+
+        assert_eq!(1, stub_factory.cells.len());
+
+        let (_, _, data) = &stub_factory.cells[0];
+
+        let borrowed_data = data.borrow();
+        let cursor = io::Cursor::new(borrowed_data.as_slice());
+
+        let iterator = ChunkDatumIterator::new(cursor, U64PairData);
+
+        let items = iterator.map(|r| r.unwrap()).collect_vec();
+
+        assert_eq!(vec![(1, 100), (2, 200), (3, 300)], items);
+
+        Ok(())
+    }
+
     fn stub_pair_writer(
         stub_factory: &mut StubChunkWriterFactory,
         chunk_size: usize,
-    ) -> SortedChunkWriter<&mut StubChunkWriterFactory, (u64, u64), U64PairHandler> {
-        SortedChunkWriter::new(42, chunk_size, stub_factory, U64PairHandler)
+    ) -> SortedChunkWriter<&mut StubChunkWriterFactory, (u64, u64), U64PairData> {
+        SortedChunkWriter::new(42, chunk_size, stub_factory, U64PairData)
     }
 
     fn to_u64s(slice: &[u8]) -> Vec<u64> {

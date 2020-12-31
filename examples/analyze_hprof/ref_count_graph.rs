@@ -2,7 +2,7 @@ use crate::dot;
 use crate::util::*;
 use jvm_hprof::{heap_dump::*, *};
 
-use crate::obj_class_index::Index;
+use crate::index::Index;
 use std::io::{self, Write};
 use std::{collections, fs, path};
 
