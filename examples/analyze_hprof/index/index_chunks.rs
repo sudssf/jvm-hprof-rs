@@ -1,6 +1,6 @@
 use super::*;
 use std::convert::TryInto;
-use std::{fs, io, marker, path};
+use std::{fs, io, iter, marker, path};
 
 /// An IndexBuilder that delegates to ChunkedrecordWriter for the actual work
 pub(crate) struct ChunkedIndexBuilder {
@@ -338,12 +338,57 @@ impl<R: io::Read, T, D: DatumDeserializer<T, R>> Iterator for ChunkDatumIterator
     }
 }
 
+/// An Iterator for merging already sorted iterators into one sorted iterator, smallest item first.
+///
+/// If used on not-sorted iterators, the output order is undefined.
+struct MergeSortIterator<T, I: Iterator<Item = T>, O: Ord, K: Fn(&T) -> O> {
+    iterators: Vec<iter::Peekable<I>>,
+    key_extractor: K,
+}
+
+impl<T, I: Iterator<Item = T>, O: Ord, K: Fn(&T) -> O> MergeSortIterator<T, I, O, K> {
+    fn new<II: IntoIterator<Item = T, IntoIter = I>>(
+        iterators: Vec<II>,
+        key_extractor: K,
+    ) -> MergeSortIterator<T, I, O, K> {
+        MergeSortIterator {
+            iterators: iterators
+                .into_iter()
+                .map(|i| i.into_iter().peekable())
+                .collect(),
+            key_extractor,
+        }
+    }
+}
+
+impl<T, I: Iterator<Item = T>, O: Ord, K: Fn(&T) -> O> Iterator for MergeSortIterator<T, I, O, K> {
+    type Item = T;
+
+    fn next(&mut self) -> Option<Self::Item> {
+        // if we get here, that means that there was at least one iterator that produced a
+        // Some, and this is the index (and element) of the iterator that produced the smallest
+        // element
+        let extr = &self.key_extractor;
+        let (iter_index, _elem) = self
+            .iterators
+            .iter_mut()
+            .enumerate()
+            .filter_map(|(index, iter)| iter.peek().map(|elem| (index, elem)))
+            .min_by_key(|(_index, elem)| (extr)(elem))?;
+
+        // that was only a peek, so we need to actually advance that iterator
+        self.iterators[iter_index].next()
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::{ChunkWriterFactory, SortedChunkWriter, U64PairData};
-    use crate::index::index_chunks::ChunkDatumIterator;
+    use crate::index::index_chunks::{ChunkDatumIterator, MergeSortIterator};
     use anyhow;
     use itertools::Itertools;
+    use rand;
+    use rand::{distributions, distributions::Distribution, Rng};
     use std::convert::TryInto;
     use std::{cell, io, rc};
 
@@ -443,6 +488,33 @@ mod tests {
         assert_eq!(vec![(1, 100), (2, 200), (3, 300)], items);
 
         Ok(())
+    }
+
+    #[test]
+    fn merged_iterator_works_random() {
+        let mut rng = rand::thread_rng();
+        for iteration in 0..1000 {
+            let vecs = (0..distributions::Uniform::from(0_usize..20).sample(&mut rng))
+                .map(|_| {
+                    let len = distributions::Uniform::from(0_usize..100).sample(&mut rng);
+                    let mut vec = (0..len).map(|_| rng.gen::<u64>()).collect_vec();
+                    vec.sort();
+                    vec
+                })
+                .collect_vec();
+
+            let mut all_data = vecs.iter().flat_map(|v| v.iter()).map(|&n| n).collect_vec();
+            all_data.sort();
+
+            let merged_iter = MergeSortIterator::new(vecs, |&num| num);
+
+            assert_eq!(
+                all_data,
+                merged_iter.collect_vec(),
+                "iteration {}",
+                iteration
+            );
+        }
     }
 
     fn stub_pair_writer(
