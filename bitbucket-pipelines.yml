@@ -1,0 +1,15 @@
+image: rust:1.48.0
+
+pipelines:
+  default:
+    - step:
+        caches:
+          - cargo
+          - rust-target
+        script:
+          - echo "Run unit tests"                   ; cargo test --all-targets
+
+definitions:
+  caches:
+    cargo: /usr/local/cargo # CARGO_HOME
+    rust-target: $BITBUCKET_CLONE_DIR/target
