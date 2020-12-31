@@ -31,7 +31,6 @@ rayon = "1.5.0"
 num_cpus = "1.13.0"
 
 # index
-sled = "0.34.6"
 lmdb-rkv = "0.14.0"
 
 # heap profiling

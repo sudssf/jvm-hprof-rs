@@ -2,13 +2,13 @@ use crate::dot;
 use crate::util::*;
 use jvm_hprof::{heap_dump::*, *};
 
-use crate::obj_class_index::ObjClassIndex;
+use crate::obj_class_index::Index;
 use std::io::{self, Write};
 use std::{collections, fs, path};
 
 /// Assemble a graph of counts between _types_, not instances, as a way of compressing huge
 /// object tangles for easier visual analysis
-pub fn ref_count_graph<I: ObjClassIndex>(
+pub fn ref_count_graph<I: Index>(
     hprof: &Hprof,
     index: &I,
     output: &path::Path,

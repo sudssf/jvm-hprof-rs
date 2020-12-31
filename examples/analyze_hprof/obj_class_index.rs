@@ -1,27 +1,33 @@
 use anyhow;
-use sled;
 
-use anyhow::Error;
 use jvm_hprof::{heap_dump::*, *};
-use std::convert::TryInto;
-use std::{cmp, collections, fmt, path, time};
+use std::io::{Error, Write};
+use std::path::Path;
+use std::{cmp, fmt, io, path};
 
-pub(crate) fn build_index<B: ObjClassIndexBuilder>(
-    hprof: &Hprof,
-    output: &path::Path,
-) -> Result<(), anyhow::Error> {
+mod index_chunks;
+
+use index_chunks::*;
+use rayon::iter::{ParallelBridge, ParallelIterator};
+
+pub(crate) fn build_index(hprof: &Hprof, output: &path::Path) -> Result<(), anyhow::Error> {
     let fingerprint = HprofFingerprint::from_hprof(hprof);
 
-    let mut builder = B::new_with_fingerprint(&fingerprint, output)?;
+    let builder = ChunkedIndexBuilder::new_with_fingerprint(fingerprint, output.to_owned())?;
 
-    // parsing is much, much faster than writing, so it does no good to parallelize parsing
-    for r in hprof.records_iter().map(|r| r.unwrap()) {
-        match r.tag() {
+    println!("[1/2] Creating sorted chunks (each . = 1,000,000 objects processed)");
+
+    hprof
+        .records_iter()
+        .map(|r| r.unwrap())
+        .enumerate()
+        .par_bridge()
+        .map(|(record_index, r)| match r.tag() {
             RecordTag::HeapDump | RecordTag::HeapDumpSegment => {
+                let mut record_writer = builder.record_writer(record_index)?;
                 let segment = r.as_heap_dump_segment().unwrap().unwrap();
 
                 let print_every = 1_000_000;
-                let mut start = time::Instant::now();
 
                 let mut count = 0_u64;
                 for p in segment.sub_records() {
@@ -29,63 +35,83 @@ pub(crate) fn build_index<B: ObjClassIndexBuilder>(
 
                     count += 1;
                     if count == print_every {
-                        let elapsed = start.elapsed();
                         count = 0;
-                        start = time::Instant::now();
-                        println!(
-                            "Indexed {} in {:?} ({}/s)",
-                            print_every,
-                            elapsed,
-                            print_every as f64 / elapsed.as_secs_f64(),
-                        );
+                        print!(".");
+                        io::stdout().flush()?;
                     }
 
                     match s {
                         SubRecord::Instance(instance) => {
-                            builder.insert_class_id(instance.obj_id(), instance.class_obj_id())?;
+                            record_writer
+                                .insert_class_id(instance.obj_id(), instance.class_obj_id())?;
                         }
                         SubRecord::ObjectArray(obj_array) => {
-                            builder.insert_class_id(
+                            record_writer.insert_class_id(
                                 obj_array.obj_id(),
                                 obj_array.array_class_obj_id(),
                             )?;
                         }
                         SubRecord::PrimitiveArray(pa) => {
-                            builder.insert_prim_array_type(pa.obj_id(), pa.primitive_type())?;
+                            record_writer
+                                .insert_prim_array_type(pa.obj_id(), pa.primitive_type())?;
                         }
                         _ => {}
                     };
                 }
+
+                // write any remaining partial chunk
+                record_writer.flush()?;
+
+                Ok(())
             }
-            _ => {}
-        }
-    }
+            _ => Ok(()),
+        })
+        .for_each(|res: Result<(), anyhow::Error>| {
+            res.unwrap();
+        });
+
+    println!("[2/2] Assembling final index structure");
+
+    builder.finalize();
 
     Ok(())
 }
 
-pub trait ObjClassIndexBuilder: Sized {
-    type Index: ObjClassIndex;
+pub trait IndexBuilder: Sized {
+    type RecWriter: RecordWriter;
 
     /// Create a new index builder
     /// - `fingerprint` - Fingerprint of the hprof
     /// - `path` - Path to write the index data to
     fn new_with_fingerprint(
-        fingerprint: &HprofFingerprint,
-        dest: &path::Path,
+        fingerprint: HprofFingerprint,
+        dest: path::PathBuf,
     ) -> Result<Self, anyhow::Error>;
 
+    /// Create a RecordWriter for a particular record index
+    fn record_writer(&self, record_index: usize) -> Result<Self::RecWriter, anyhow::Error>;
+
+    /// Do any necessary conversion from intermediate formats to the final index structure.
+    fn finalize(&self);
+}
+
+/// To be used to write the data for one individual hprof record.
+pub trait RecordWriter {
     /// Insert a mapping from an object id (plain object or reference array, not Class object or primitive array) to a class id
     fn insert_class_id(&mut self, obj_id: Id, class_id: Id) -> Result<(), anyhow::Error>;
 
+    /// Insert a mapping from an object id to a primitive array type
     fn insert_prim_array_type(
         &mut self,
         obj_id: Id,
         prim_array_type: PrimitiveArrayType,
     ) -> Result<(), anyhow::Error>;
+
+    /// Flush any buffered data
+    fn flush(&mut self) -> Result<(), anyhow::Error>;
 }
 
-pub trait ObjClassIndex: Sized {
+pub trait Index: Sized {
     /// Open the index at the provided path, and make sure that its stored fingerprint matches
     /// `fingerprint`
     fn open_with_fingerprint(
@@ -138,7 +164,7 @@ fn build_if_fingerprint_match<R, F, I>(
 where
     R: AsRef<[u8]> + Clone + fmt::Debug + cmp::PartialEq,
     F: FnOnce() -> Result<I, anyhow::Error>,
-    I: ObjClassIndex,
+    I: Index,
 {
     ts.clone()
         .map(|bytes| bytes.as_ref() == &fingerprint.timestamp.to_le_bytes()[..])
@@ -157,11 +183,6 @@ where
         })
 }
 
-pub(crate) struct SledIndex {
-    obj_id_class_id: sled::Tree,
-    obj_id_prim_type: sled::Tree,
-}
-
 // fingerprint keys
 const FP_TIMESTAMP: &str = "__hprof_header_fingerprint_timestamp";
 const FP_RECORD_COUNT: &str = "__hprof_header_fingerprint_record_count";
@@ -171,107 +192,24 @@ const FINGERPRINT: &str = "fingerprint";
 const OBJ_ID_CLASS_ID: &str = "obj_id_class_id";
 const OBJ_ID_PRIM_TYPE: &str = "obj_id_prim_type";
 
-impl ObjClassIndexBuilder for SledIndex {
-    type Index = SledIndex;
+pub(crate) struct LmdbIndex {}
 
-    fn new_with_fingerprint(
-        fingerprint: &HprofFingerprint,
-        dest: &path::Path,
-    ) -> Result<Self, anyhow::Error> {
-        let db = sled::Config::new().create_new(true).path(dest).open()?;
-
-        let fingerprint_tree = db.open_tree(FINGERPRINT)?;
-
-        fingerprint_tree.insert(
-            FP_TIMESTAMP.as_bytes(),
-            &fingerprint.timestamp.to_le_bytes(),
-        )?;
-        fingerprint_tree.insert(
-            FP_RECORD_COUNT.as_bytes(),
-            &fingerprint.record_count.to_le_bytes(),
-        )?;
-
-        Ok(SledIndex {
-            obj_id_class_id: db.open_tree(OBJ_ID_CLASS_ID)?,
-            obj_id_prim_type: db.open_tree(OBJ_ID_PRIM_TYPE)?,
-        })
-    }
-
-    fn insert_class_id(&mut self, obj_id: Id, class_id: Id) -> Result<(), Error> {
-        self.obj_id_class_id
-            .insert(&obj_id.id().to_le_bytes(), &class_id.id().to_le_bytes())?;
-
-        Ok(())
-    }
-
-    fn insert_prim_array_type(
-        &mut self,
-        obj_id: Id,
-        prim_array_type: PrimitiveArrayType,
-    ) -> Result<(), Error> {
-        self.obj_id_prim_type
-            .insert(&obj_id.id().to_le_bytes(), &[prim_array_type.type_code()])?;
-
-        Ok(())
-    }
-}
-
-impl ObjClassIndex for SledIndex {
+impl Index for LmdbIndex {
     fn open_with_fingerprint(
-        fingerprint: &HprofFingerprint,
-        source: &path::Path,
-    ) -> Result<Self, Error> {
-        let db = sled::open(source)?;
-
-        let trees = db
-            .tree_names()
-            .into_iter()
-            .collect::<collections::HashSet<_>>();
-
-        for &tree_name in [FINGERPRINT, OBJ_ID_CLASS_ID, OBJ_ID_PRIM_TYPE].iter() {
-            if !trees.contains(tree_name.as_bytes()) {
-                return Err(anyhow::Error::msg(format!(
-                    "Db did not contain the required tree {}",
-                    tree_name
-                )));
-            }
-        }
-
-        let fingerprint_tree = db.open_tree(FINGERPRINT)?;
-
-        let ts = fingerprint_tree.get(FP_TIMESTAMP)?;
-        let record_count = fingerprint_tree.get(FP_RECORD_COUNT)?;
-
-        build_if_fingerprint_match(fingerprint, ts, record_count, move || {
-            Ok(SledIndex {
-                obj_id_class_id: db.open_tree(OBJ_ID_CLASS_ID)?,
-                obj_id_prim_type: db.open_tree(OBJ_ID_PRIM_TYPE)?,
-            })
-        })
+        _fingerprint: &HprofFingerprint,
+        _source: &Path,
+    ) -> Result<Self, anyhow::Error> {
+        unimplemented!()
     }
 
-    fn get_class_id(&self, obj_id: Id) -> Result<Option<Id>, anyhow::Error> {
-        self.obj_id_class_id
-            .get(obj_id.id().to_le_bytes())
-            .map(|value| {
-                value.map(|vec| {
-                    Id::from(u64::from_le_bytes(
-                        vec.as_ref().try_into().expect("Invalid index entry"),
-                    ))
-                })
-            })
-            .map_err(|e| anyhow::Error::from(e))
+    fn get_class_id(&self, _obj_id: Id) -> Result<Option<Id>, anyhow::Error> {
+        unimplemented!()
     }
 
-    fn get_prim_array_type(&self, obj_id: Id) -> Result<Option<PrimitiveArrayType>, Error> {
-        self.obj_id_prim_type
-            .get(obj_id.id().to_le_bytes())
-            .map(|opt_data| {
-                opt_data.map(|data| {
-                    let byte = *data.as_ref().get(0).expect("Invalid index entry");
-                    PrimitiveArrayType::from_type_code(byte).expect("Invalid array type code")
-                })
-            })
-            .map_err(|e| anyhow::Error::from(e))
+    fn get_prim_array_type(
+        &self,
+        _obj_id: Id,
+    ) -> Result<Option<PrimitiveArrayType>, anyhow::Error> {
+        unimplemented!()
     }
 }

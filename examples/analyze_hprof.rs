@@ -29,7 +29,7 @@ mod instance_counts;
 #[path = "analyze_hprof/obj_class_index.rs"]
 mod obj_class_index;
 
-use crate::obj_class_index::{HprofFingerprint, ObjClassIndex, SledIndex};
+use crate::obj_class_index::{HprofFingerprint, Index, LmdbIndex};
 use util::*;
 
 fn main() -> Result<(), anyhow::Error> {
@@ -83,7 +83,7 @@ fn main() -> Result<(), anyhow::Error> {
                     clap::Arg::with_name("index")
                         .short("i")
                         .long("index")
-                        .help("path index for the hprof file (created with the obj-class-index subcommand)")
+                        .help("path index for the hprof file (created with the build-index subcommand)")
                         .required(true)
                         .takes_value(true),
                 )
@@ -106,7 +106,7 @@ fn main() -> Result<(), anyhow::Error> {
         )
         .subcommand(clap::SubCommand::with_name("instance-counts")
             .about("Display the instance count for each class as CSV"))
-        .subcommand(clap::SubCommand::with_name("obj-class-index")
+        .subcommand(clap::SubCommand::with_name("build-index")
             .about("Build an index on disk for subsequent use with other commands")
             .arg(clap::Arg::with_name("output")
                 .short("o")
@@ -161,7 +161,7 @@ fn main() -> Result<(), anyhow::Error> {
             let index = matches
                 .value_of("index")
                 .map(|s| {
-                    SledIndex::open_with_fingerprint(
+                    LmdbIndex::open_with_fingerprint(
                         &HprofFingerprint::from_hprof(&hprof),
                         path::Path::new(s),
                     )
@@ -178,16 +178,14 @@ fn main() -> Result<(), anyhow::Error> {
             ref_count_graph::ref_count_graph(&hprof, &index, output, min_edge_count)
         }
         ("instance-counts", _) => instance_counts::instance_counts(&hprof)?,
-        ("obj-class-index", arg_matches) => {
-            obj_class_index::build_index::<obj_class_index::SledIndex>(
-                &hprof,
-                arg_matches
-                    .expect("must provide args")
-                    .value_of("output")
-                    .map(|s| path::Path::new(s))
-                    .expect("must provide output path"),
-            )?
-        }
+        ("build-index", arg_matches) => obj_class_index::build_index(
+            &hprof,
+            arg_matches
+                .expect("must provide args")
+                .value_of("output")
+                .map(|s| path::Path::new(s))
+                .expect("must provide output path"),
+        )?,
         _ => panic!("Unknown subcommand"),
     };
 
