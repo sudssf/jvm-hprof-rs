@@ -30,6 +30,7 @@ anyhow = "1.0.36"
 rayon = "1.5.0"
 num_cpus = "1.13.0"
 rand = "0.8.0"
+is_sorted = "0.1.1"
 
 # index
 lmdb-rkv = "0.14.0"
@@ -41,5 +42,5 @@ lmdb-rkv = "0.14.0"
 name = "analyze_hprof"
 
 [profile.release]
-# for dhat
-#debug = 1
+# for dhat or other profiling
+debug = 1

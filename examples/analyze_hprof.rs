@@ -113,7 +113,8 @@ fn main() -> Result<(), anyhow::Error> {
                 .long("output")
                 .help("path to output index at")
                 .required(true)
-                .takes_value(true)));
+                .takes_value(true))
+        );
     let matches = app.get_matches();
 
     let file_path = matches.value_of("file").expect("file must be specified");

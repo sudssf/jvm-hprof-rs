@@ -1,32 +1,203 @@
-use super::*;
+use crate::index::{
+    build_if_fingerprint_match, HprofFingerprint, Index, IndexBuilder, IndexSequence,
+};
+
+use std::{fs, io, path};
+
+use itertools::Itertools;
+use jvm_hprof::heap_dump::PrimitiveArrayType;
+use jvm_hprof::Id;
+use lmdb;
+use lmdb::{Database, Error, Transaction};
+use std::convert::TryInto;
+use std::io::Write;
 
 // fingerprint keys
 const FP_TIMESTAMP: &str = "__hprof_header_fingerprint_timestamp";
 const FP_RECORD_COUNT: &str = "__hprof_header_fingerprint_record_count";
 
 // tree names
-const FINGERPRINT: &str = "fingerprint";
+const METADATA: &str = "metadata";
 const OBJ_ID_CLASS_ID: &str = "obj_id_class_id";
 const OBJ_ID_PRIM_TYPE: &str = "obj_id_prim_type";
 
-pub(crate) struct LmdbIndex {}
+pub(crate) struct LmdbIndex {
+    env: lmdb::Environment,
+    obj_id_class_id_db: lmdb::Database,
+    obj_id_prim_array_type_db: lmdb::Database,
+}
 
 impl Index for LmdbIndex {
     fn open_with_fingerprint(
-        _fingerprint: &HprofFingerprint,
-        _source: &Path,
+        fingerprint: &HprofFingerprint,
+        index_path: &path::Path,
     ) -> Result<Self, anyhow::Error> {
-        unimplemented!()
+        let env = lmdb::Environment::new()
+            // a terabyte would be a very big index indeed
+            .set_map_size(1024 * 1024 * 1024 * 1024)
+            .set_max_dbs(3)
+            .open(&index_path)?;
+
+        let metadata_db = env.open_db(Some(METADATA))?;
+        let obj_id_class_id_db = env.open_db(Some(OBJ_ID_CLASS_ID))?;
+        let obj_id_prim_array_type_db = env.open_db(Some(OBJ_ID_PRIM_TYPE))?;
+
+        let txn = env.begin_ro_txn()?;
+
+        let ts = txn
+            .get_opt(metadata_db, &FP_TIMESTAMP)?
+            // clone the data so we can commit the txn before moving env into the LmdbIndex
+            .map(|slice| slice.iter().map(|&b| b).collect_vec());
+        let record_count = txn
+            .get_opt(metadata_db, &FP_RECORD_COUNT)?
+            .map(|slice| slice.iter().map(|&b| b).collect_vec());
+
+        txn.commit()?;
+
+        let res = build_if_fingerprint_match(fingerprint, ts, record_count, || {
+            Ok(LmdbIndex {
+                env,
+                obj_id_class_id_db,
+                obj_id_prim_array_type_db,
+            })
+        });
+
+        res
     }
 
-    fn get_class_id(&self, _obj_id: Id) -> Result<Option<Id>, anyhow::Error> {
-        unimplemented!()
+    fn get_class_id(&self, obj_id: Id) -> Result<Option<Id>, anyhow::Error> {
+        let txn = self.env.begin_ro_txn()?;
+
+        txn.get_opt(self.obj_id_class_id_db, &obj_id.id().to_le_bytes())
+            .map(|opt| {
+                opt.map(|bytes| {
+                    Id::from(u64::from_le_bytes(
+                        bytes.try_into().expect("Invalid index value"),
+                    ))
+                })
+            })
+            // txn will commit in its Drop impl but might as well be explicit if we haven't already errored out
+            .and_then(|id| txn.commit().map(|_| id))
+            .map_err(|e| anyhow::Error::from(e))
     }
 
-    fn get_prim_array_type(
+    fn get_prim_array_type(&self, obj_id: Id) -> Result<Option<PrimitiveArrayType>, anyhow::Error> {
+        let txn = self.env.begin_ro_txn()?;
+
+        txn.get_opt(self.obj_id_prim_array_type_db, &obj_id.id().to_le_bytes())
+            .map(|opt| {
+                opt.map(|bytes| {
+                    PrimitiveArrayType::from_type_code(bytes[0]).expect("Invalid index value")
+                })
+            })
+            // txn will commit in its Drop impl but might as well be explicit if we haven't already errored out
+            .and_then(|id| txn.commit().map(|_| id))
+            .map_err(|e| anyhow::Error::from(e))
+    }
+}
+
+impl IndexBuilder for LmdbIndex {
+    fn build_index<S: IndexSequence>(
+        seq: &mut S,
+        fingerprint: HprofFingerprint,
+        index_path: &path::Path,
+    ) -> Result<(), anyhow::Error> {
+        let mut lmdb_dir = index_path.to_path_buf();
+        lmdb_dir.push("lmdb");
+
+        fs::create_dir_all(&lmdb_dir)?;
+
+        let env = lmdb::Environment::new()
+            // a terabyte would be a very big index indeed
+            .set_map_size(1024 * 1024 * 1024 * 1024)
+            .set_max_dbs(3)
+            .open(&lmdb_dir)?;
+
+        // TODO report bug: opening a db after opening a txn hangs
+        let metadata_db = env.create_db(Some(METADATA), lmdb::DatabaseFlags::default())?;
+        let obj_id_class_id_db =
+            env.create_db(Some(OBJ_ID_CLASS_ID), lmdb::DatabaseFlags::default())?;
+        let obj_id_prim_type_db =
+            env.create_db(Some(OBJ_ID_PRIM_TYPE), lmdb::DatabaseFlags::default())?;
+
+        let mut txn = env.begin_rw_txn()?;
+
+        // using big-endian to stay consistent with the rest of the numbers
+        txn.put(
+            metadata_db,
+            &FP_TIMESTAMP,
+            &fingerprint.timestamp.to_be_bytes(),
+            lmdb::WriteFlags::default(),
+        )?;
+        txn.put(
+            metadata_db,
+            &FP_RECORD_COUNT,
+            &fingerprint.record_count.to_be_bytes(),
+            lmdb::WriteFlags::default(),
+        )?;
+
+        let mut count_since_last_print = 0_u64;
+        let print_threshold = 1_000_000;
+
+        {
+            let mut cursor = txn.open_rw_cursor(obj_id_class_id_db)?;
+
+            for res in seq.iter_obj_id_class_id()? {
+                let (key, value): (u64, u64) = res?;
+                cursor.put(
+                    &key.to_be_bytes(),
+                    &value.to_be_bytes(),
+                    lmdb::WriteFlags::APPEND,
+                )?;
+                count_since_last_print += 1;
+
+                if count_since_last_print == print_threshold {
+                    print!(".");
+                    io::stdout().flush()?;
+                    count_since_last_print = 0;
+                }
+            }
+        }
+
+        {
+            let mut cursor = txn.open_rw_cursor(obj_id_prim_type_db)?;
+
+            for res in seq.iter_obj_id_prim_array_type()? {
+                let (key, value): (u64, u8) = res?;
+                cursor.put(&key.to_be_bytes(), &[value], lmdb::WriteFlags::APPEND)?;
+                count_since_last_print += 1;
+
+                if count_since_last_print == print_threshold {
+                    print!(".");
+                    io::stdout().flush()?;
+                    count_since_last_print = 0;
+                }
+            }
+        }
+
+        txn.commit()?;
+
+        Ok(())
+    }
+}
+
+trait LmdbTxnExt {
+    /// Express missing as Option instead of using the lmdb::Error::NotFound case.
+    fn get_opt<K: AsRef<[u8]>>(
         &self,
-        _obj_id: Id,
-    ) -> Result<Option<PrimitiveArrayType>, anyhow::Error> {
-        unimplemented!()
+        database: lmdb::Database,
+        key: &K,
+    ) -> Result<Option<&[u8]>, lmdb::Error>;
+}
+
+impl<T: lmdb::Transaction> LmdbTxnExt for T {
+    fn get_opt<K: AsRef<[u8]>>(&self, database: Database, key: &K) -> Result<Option<&[u8]>, Error> {
+        match self.get(database, key) {
+            Ok(x) => Ok(Some(x)),
+            Err(e) => match e {
+                lmdb::Error::NotFound => Ok(None),
+                _ => Err(e),
+            },
+        }
     }
 }

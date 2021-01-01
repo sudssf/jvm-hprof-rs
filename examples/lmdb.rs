@@ -11,14 +11,6 @@ fn main() -> Result<(), anyhow::Error> {
     fs::create_dir_all(&path)?;
 
     let env = lmdb::Environment::new()
-        .set_flags(
-            // we're only writing, and from a single thread, so no locking is ok
-            lmdb::EnvironmentFlags::NO_LOCK
-                // use a writeable memory map -- less safe, but a partially written index is useless
-                | lmdb::EnvironmentFlags::WRITE_MAP
-                // async flush to disk
-                | lmdb::EnvironmentFlags::MAP_ASYNC,
-        )
         .set_map_size(100 * 1024 * 1024 * 1024)
         .open(std::path::Path::new(path.as_str()))?;
 
@@ -28,11 +20,14 @@ fn main() -> Result<(), anyhow::Error> {
 
     let mut cursor = txn.open_rw_cursor(db)?;
 
+    let overall_start = time::Instant::now();
     let mut start = time::Instant::now();
     let mut count = 0_u64;
     let sample_period = 1_000_000;
 
-    for i in 0_u64..100_000_000 {
+    let total_inserted = 100_000_000;
+
+    for i in 0_u64..total_inserted {
         if count == sample_period {
             count = 0;
             let duration = start.elapsed();
@@ -53,6 +48,14 @@ fn main() -> Result<(), anyhow::Error> {
 
         count += 1;
     }
+
+    let overall_elapsed = overall_start.elapsed();
+    println!(
+        "Overall: inserted {} in {:?} ({}/s)",
+        total_inserted,
+        overall_elapsed,
+        total_inserted as f64 / overall_elapsed.as_secs_f64()
+    );
 
     Ok(())
 }

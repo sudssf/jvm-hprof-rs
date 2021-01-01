@@ -1,23 +1,31 @@
 use anyhow;
+use is_sorted;
 
+use crate::index::lmdb::LmdbIndex;
+use index_chunks::*;
+use is_sorted::IsSorted;
+use itertools::Itertools;
 use jvm_hprof::{heap_dump::*, *};
-use std::io::{Error, Write};
-use std::path::Path;
-use std::{cmp, fmt, io, path};
+use merge::*;
+use rayon::iter::{ParallelBridge, ParallelIterator};
+use std::io::Write;
+use std::{cmp, fmt, fs, io, path};
 
 mod index_chunks;
-
 pub mod lmdb;
+mod merge;
 
-use index_chunks::*;
-use rayon::iter::{ParallelBridge, ParallelIterator};
+// subdir where obj id to class id mappings are written
+const SUBDIR_OBJ_CLASS: &str = "obj-id-class-id";
+// same, but for obj id to primitive array type
+const SUBDIR_OBJ_PRIM_ARRAY_TYPE: &str = "obj-id-prim-array-type";
 
 pub(crate) fn build_index(hprof: &Hprof, output: &path::Path) -> Result<(), anyhow::Error> {
     let fingerprint = HprofFingerprint::from_hprof(hprof);
 
-    let builder = ChunkedIndexBuilder::new_with_fingerprint(fingerprint, output.to_owned())?;
+    let builder = ChunkedIndexSeqBuilder::new(output.to_owned())?;
 
-    println!("[1/2] Creating sorted chunks (each . = 1,000,000 objects processed)");
+    println!("[1/3] Creating sorted chunks (. = 1,000,000 objects processed)");
 
     hprof
         .records_iter()
@@ -45,17 +53,17 @@ pub(crate) fn build_index(hprof: &Hprof, output: &path::Path) -> Result<(), anyh
                     match s {
                         SubRecord::Instance(instance) => {
                             record_writer
-                                .insert_class_id(instance.obj_id(), instance.class_obj_id())?;
+                                .write_class_id(instance.obj_id(), instance.class_obj_id())?;
                         }
                         SubRecord::ObjectArray(obj_array) => {
-                            record_writer.insert_class_id(
+                            record_writer.write_class_id(
                                 obj_array.obj_id(),
                                 obj_array.array_class_obj_id(),
                             )?;
                         }
                         SubRecord::PrimitiveArray(pa) => {
                             record_writer
-                                .insert_prim_array_type(pa.obj_id(), pa.primitive_type())?;
+                                .write_prim_array_type(pa.obj_id(), pa.primitive_type())?;
                         }
                         _ => {}
                     };
@@ -72,53 +80,26 @@ pub(crate) fn build_index(hprof: &Hprof, output: &path::Path) -> Result<(), anyh
             res.unwrap();
         });
 
-    println!("[2/2] Assembling final index structure");
+    println!("\n[2/3] Merge-sorting index data (. = 1 merged file written)");
 
-    builder.finalize();
+    let mut index_seq = builder.finalize()?;
+
+    println!("\n[3/3] Assembling final index structure (. = 1,000,000 index entries inserted)");
+
+    LmdbIndex::build_index(&mut index_seq, fingerprint, output)?;
+
+    index_seq.remove_tmp_files()?;
 
     Ok(())
 }
 
-pub trait IndexBuilder: Sized {
-    type RecWriter: RecordWriter;
-
-    /// Create a new index builder
-    /// - `fingerprint` - Fingerprint of the hprof
-    /// - `path` - Path to write the index data to
-    fn new_with_fingerprint(
-        fingerprint: HprofFingerprint,
-        dest: path::PathBuf,
-    ) -> Result<Self, anyhow::Error>;
-
-    /// Create a RecordWriter for a particular record index
-    fn record_writer(&self, record_index: usize) -> Result<Self::RecWriter, anyhow::Error>;
-
-    /// Do any necessary conversion from intermediate formats to the final index structure.
-    fn finalize(&self);
-}
-
-/// To be used to write the data for one individual hprof record.
-pub trait RecordWriter {
-    /// Insert a mapping from an object id (plain object or reference array, not Class object or primitive array) to a class id
-    fn insert_class_id(&mut self, obj_id: Id, class_id: Id) -> Result<(), anyhow::Error>;
-
-    /// Insert a mapping from an object id to a primitive array type
-    fn insert_prim_array_type(
-        &mut self,
-        obj_id: Id,
-        prim_array_type: PrimitiveArrayType,
-    ) -> Result<(), anyhow::Error>;
-
-    /// Flush any buffered data
-    fn flush(&mut self) -> Result<(), anyhow::Error>;
-}
-
+// Sized so Self can be used in return types
 pub trait Index: Sized {
     /// Open the index at the provided path, and make sure that its stored fingerprint matches
     /// `fingerprint`
     fn open_with_fingerprint(
         fingerprint: &HprofFingerprint,
-        source: &path::Path,
+        index_path: &path::Path,
     ) -> Result<Self, anyhow::Error>;
 
     /// Get the class id for an object id, if available.
@@ -129,6 +110,68 @@ pub trait Index: Sized {
 
     /// Get the primitive array type for an object id, if available.
     fn get_prim_array_type(&self, obj_id: Id) -> Result<Option<PrimitiveArrayType>, anyhow::Error>;
+}
+
+/// Consumes an [IndexSequence] to produce the final [Index].
+pub trait IndexBuilder {
+    fn build_index<S: IndexSequence>(
+        seq: &mut S,
+        fingerprint: HprofFingerprint,
+        index_dir: &path::Path,
+    ) -> Result<(), anyhow::Error>;
+}
+
+/// Accumulates a sorted intermediate stage of the index.
+///
+/// Creating a billion-key data structure out of a random key ordering is brutally slow. Depending
+/// on the datastore, importing sorted keys can be several orders of magnitude faster, so we sort
+/// the data first.
+// Sized so Self can be used in return types
+pub trait IndexSequenceBuilder: Sized {
+    type RecWriter: RecordWriter;
+    type Seq: IndexSequence;
+
+    /// Create a new index builder
+    /// - `path` - Path to write the index data to
+    fn new(dest: path::PathBuf) -> Result<Self, anyhow::Error>;
+
+    /// Create a RecordWriter for a particular record index.
+    ///
+    /// Multiple Records can writing to their own RecordWriter in parallel.
+    fn record_writer(&self, record_index: usize) -> Result<Self::RecWriter, anyhow::Error>;
+
+    /// Once all RecordWriters are finished, do any necessary conversion from intermediate formats
+    /// to the final index structure.
+    fn finalize(&self) -> Result<Self::Seq, anyhow::Error>;
+}
+
+/// The output of [IndexSequenceBuilder]. Provides in-order iteration over index data.
+pub trait IndexSequence {
+    type ObjIdClassIdIterator: Iterator<Item = Result<(u64, u64), io::Error>>;
+    type ObjIdPrimArrayTypeIterator: Iterator<Item = Result<(u64, u8), io::Error>>;
+
+    fn iter_obj_id_class_id(&mut self) -> Result<Self::ObjIdClassIdIterator, anyhow::Error>;
+    fn iter_obj_id_prim_array_type(
+        &mut self,
+    ) -> Result<Self::ObjIdPrimArrayTypeIterator, anyhow::Error>;
+
+    fn remove_tmp_files(self) -> Result<(), io::Error>;
+}
+
+/// To be used to write the data for one individual hprof record.
+pub trait RecordWriter {
+    /// Insert a mapping from an object id (plain object or reference array, not Class object or primitive array) to a class id
+    fn write_class_id(&mut self, obj_id: Id, class_id: Id) -> Result<(), anyhow::Error>;
+
+    /// Insert a mapping from an object id to a primitive array type
+    fn write_prim_array_type(
+        &mut self,
+        obj_id: Id,
+        prim_array_type: PrimitiveArrayType,
+    ) -> Result<(), anyhow::Error>;
+
+    /// Flush any buffered data
+    fn flush(self) -> Result<(), anyhow::Error>;
 }
 
 /// Easily acquired data about a particular hprof file to help avoid using the wrong index when
