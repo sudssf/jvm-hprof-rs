@@ -103,7 +103,8 @@ pub(crate) fn merge_chunk_type<T, W: DatumDeserializer<T> + DatumSerializer<T> +
             fs::remove_file(de.path())?
         }
 
-        println!("\n");
+        println!();
+
         // now, entries are what we just merged
         files_to_merge = fs::read_dir(&merge_dir)?.map(|r| r.unwrap()).collect();
         counter += 1;

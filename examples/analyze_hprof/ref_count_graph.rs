@@ -22,7 +22,8 @@ pub fn ref_count_graph<I: Index>(
 
     let missing_utf8 = "(missing utf8)";
 
-    // TODO parallelize?
+    // this pass already goes at about 1G/s on one core, so the available speedup from parallelizing
+    // isn't very high before i/o is saturated anyway
     hprof
         .records_iter()
         .map(|r| r.unwrap())
@@ -55,7 +56,7 @@ pub fn ref_count_graph<I: Index>(
     // class obj id => vec of all instance field descriptors (the class, then super class, then ...)
     let class_instance_field_descriptors = build_type_hierarchy_field_descriptors(&classes);
 
-    // now, iterate over objects again and accumulate edge counts
+    // iterate over objects and accumulate edge counts
 
     let mut graph_edges: collections::HashMap<GraphEdge, u64> = collections::HashMap::new();
 
@@ -97,6 +98,9 @@ pub fn ref_count_graph<I: Index>(
     };
 
     // TODO parallelize?
+
+    println!(". = 1,000,000 heap dump segment sub records");
+    let mut sub_records = 0_u64;
     hprof
         .records_iter()
         .map(|r| r.unwrap())
@@ -105,6 +109,15 @@ pub fn ref_count_graph<I: Index>(
                 let segment = r.as_heap_dump_segment().unwrap().unwrap();
                 for p in segment.sub_records() {
                     let s = p.unwrap();
+
+                    sub_records += 1;
+
+                    if sub_records == 1_000_000 {
+                        sub_records = 0;
+                        print!(".");
+                        // TODO
+                        io::stdout().flush().unwrap();
+                    }
 
                     match s {
                         SubRecord::GcRootUnknown(gc_root) => match edge_dest_for_obj_id(gc_root.obj_id()) {
@@ -268,6 +281,8 @@ pub fn ref_count_graph<I: Index>(
             }
             _ => {}
         });
+
+    println!();
 
     graph_edges.retain(|_edge, count| *count >= min_edge_count);
 

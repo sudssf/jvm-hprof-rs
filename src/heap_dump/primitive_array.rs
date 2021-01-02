@@ -1,5 +1,8 @@
 use crate::*;
 
+use strum_macros;
+use strum_macros::EnumIter;
+
 /// Methods for accessing the contents of the array always return Some for method matching the array type and None otherwise (e.g. if it's a PrimitiveArrayType::Float, floats() will always be Some.
 #[derive(CopyGetters)]
 pub struct PrimitiveArray<'a> {
@@ -123,7 +126,7 @@ iter_struct!(Shorts, i16);
 iter_struct!(Ints, i32);
 iter_struct!(Longs, i64);
 
-#[derive(Clone, Copy, Debug, Hash, Eq, PartialEq)]
+#[derive(Clone, Copy, Debug, Hash, Eq, PartialEq, EnumIter)]
 pub enum PrimitiveArrayType {
     Boolean,
     Char,

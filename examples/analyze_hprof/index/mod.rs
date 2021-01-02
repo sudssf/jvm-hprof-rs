@@ -86,7 +86,7 @@ pub(crate) fn build_index(hprof: &Hprof, output: &path::Path) -> Result<(), anyh
 
     println!("\n[3/3] Assembling final index structure (. = 1,000,000 index entries inserted)");
 
-    LmdbIndex::build_index(&mut index_seq, fingerprint, output)?;
+    LmdbIndex::build_index(&mut index_seq, &fingerprint, output)?;
 
     index_seq.remove_tmp_files()?;
 
@@ -115,8 +115,8 @@ pub trait Index: Sized {
 /// Consumes an [IndexSequence] to produce the final [Index].
 pub trait IndexBuilder {
     fn build_index<S: IndexSequence>(
-        seq: &mut S,
-        fingerprint: HprofFingerprint,
+        seq: &S,
+        fingerprint: &HprofFingerprint,
         index_dir: &path::Path,
     ) -> Result<(), anyhow::Error>;
 }
@@ -150,9 +150,12 @@ pub trait IndexSequence {
     type ObjIdClassIdIterator: Iterator<Item = Result<(u64, u64), io::Error>>;
     type ObjIdPrimArrayTypeIterator: Iterator<Item = Result<(u64, u8), io::Error>>;
 
-    fn iter_obj_id_class_id(&mut self) -> Result<Self::ObjIdClassIdIterator, anyhow::Error>;
+    /// Produce an iterator over obj id to class id mappings, sorted by obj id
+    fn iter_obj_id_class_id(&self) -> Result<Self::ObjIdClassIdIterator, anyhow::Error>;
+
+    /// Produce an iterator over obj id to prim array type mappings, sorted by obj id
     fn iter_obj_id_prim_array_type(
-        &mut self,
+        &self,
     ) -> Result<Self::ObjIdPrimArrayTypeIterator, anyhow::Error>;
 
     fn remove_tmp_files(self) -> Result<(), io::Error>;
@@ -212,11 +215,11 @@ where
     I: Index,
 {
     ts.clone()
-        .map(|bytes| bytes.as_ref() == &fingerprint.timestamp.to_le_bytes()[..])
+        .map(|bytes| bytes.as_ref() == &fingerprint.timestamp.to_be_bytes()[..])
         .zip(
             record_count
                 .clone()
-                .map(|bytes| bytes.as_ref() == &fingerprint.record_count.to_le_bytes()[..]),
+                .map(|bytes| bytes.as_ref() == &fingerprint.record_count.to_be_bytes()[..]),
         )
         .map(|(ts_match, count_match)| ts_match && count_match)
         .and_then(|matched| if matched { Some(build()) } else { None })

@@ -73,14 +73,14 @@ impl IndexSequence for MergedFileIndexSequence {
     type ObjIdPrimArrayTypeIterator =
         ChunkDatumIterator<io::BufReader<fs::File>, (u64, u8), U64U8Data>;
 
-    fn iter_obj_id_class_id(&mut self) -> Result<Self::ObjIdClassIdIterator, anyhow::Error> {
+    fn iter_obj_id_class_id(&self) -> Result<Self::ObjIdClassIdIterator, anyhow::Error> {
         Ok(ChunkDatumIterator::new(io::BufReader::new(fs::File::open(
             &self.obj_id_class_id_file,
         )?)))
     }
 
     fn iter_obj_id_prim_array_type(
-        &mut self,
+        &self,
     ) -> Result<Self::ObjIdPrimArrayTypeIterator, anyhow::Error> {
         Ok(ChunkDatumIterator::new(io::BufReader::new(fs::File::open(
             &self.obj_id_prim_array_type_file,
