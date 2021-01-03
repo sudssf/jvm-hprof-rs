@@ -2,6 +2,7 @@ use crate::dot;
 use crate::util::*;
 use jvm_hprof::{heap_dump::*, *};
 
+use crate::counter::Counter;
 use crate::index::Index;
 use std::io::{self, Write};
 use std::{collections, fs, path};
@@ -58,7 +59,7 @@ pub fn ref_count_graph<I: Index>(
 
     // iterate over objects and accumulate edge counts
 
-    let mut graph_edges: collections::HashMap<GraphEdge, u64> = collections::HashMap::new();
+    let mut graph_edges: Counter<GraphEdge> = Counter::new();
 
     let id_size = hprof.header().id_size();
 
@@ -91,10 +92,7 @@ pub fn ref_count_graph<I: Index>(
     };
 
     let mut bump_edge_counter = |source: HeapGraphSource, dest: HeapGraphDest| {
-        graph_edges
-            .entry(GraphEdge { source, dest })
-            .and_modify(|c| *c += 1)
-            .or_insert(1_u64);
+        graph_edges.increment(GraphEdge { source, dest })
     };
 
     // TODO parallelize?
@@ -292,18 +290,24 @@ pub fn ref_count_graph<I: Index>(
 
     // for each class referenced, add a node with all the fields
     graph_edges
-        .keys()
+        .iter()
+        .map(|(k, _v)| k)
         .filter_map(|edge| match edge.source {
             HeapGraphSource::StaticField { class_obj_id, .. } => Some(class_obj_id),
             HeapGraphSource::InstanceField { class_obj_id, .. } => Some(class_obj_id),
             HeapGraphSource::ObjectArray { class_obj_id } => Some(class_obj_id),
             _ => None,
         })
-        .chain(graph_edges.keys().filter_map(|edge| match edge.dest {
-            HeapGraphDest::InstanceOfClass { class_obj_id } => Some(class_obj_id),
-            HeapGraphDest::ClassObj { class_obj_id } => Some(class_obj_id),
-            HeapGraphDest::PrimitiveArray { .. } => None,
-        }))
+        .chain(
+            graph_edges
+                .iter()
+                .map(|(k, _v)| k)
+                .filter_map(|edge| match edge.dest {
+                    HeapGraphDest::InstanceOfClass { class_obj_id } => Some(class_obj_id),
+                    HeapGraphDest::ClassObj { class_obj_id } => Some(class_obj_id),
+                    HeapGraphDest::PrimitiveArray { .. } => None,
+                }),
+        )
         // uniqueify -- each id will only have one source mode
         .collect::<collections::HashSet<Id>>()
         .iter()
@@ -322,7 +326,8 @@ pub fn ref_count_graph<I: Index>(
 
     // gc roots
     graph_edges
-        .keys()
+        .iter()
+        .map(|(k, _v)| k)
         .filter(|edge| match edge.source {
             HeapGraphSource::GcRootUnknown => true,
             HeapGraphSource::GcRootThreadObj => true,
@@ -351,7 +356,8 @@ pub fn ref_count_graph<I: Index>(
 
     // primitive arrays
     graph_edges
-        .keys()
+        .iter()
+        .map(|(k, _v)| k)
         .filter_map(|edge| match edge.dest {
             HeapGraphDest::InstanceOfClass { .. } => None,
             HeapGraphDest::ClassObj { .. } => None,

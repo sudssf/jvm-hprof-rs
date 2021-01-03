@@ -81,7 +81,7 @@ pub(crate) fn merge_chunk_type<T, W: DatumDeserializer<T> + DatumSerializer<T> +
                 io::stdout().flush()?;
 
                 // ensure output is sorted
-                assert!(
+                debug_assert!(
                     // use UFCS to use crate's version instead of unstable stdlib is_sorted_by_key
                     IsSorted::is_sorted_by_key(
                         &mut ChunkDatumIterator::<_, _, W>::new(io::BufReader::new(
@@ -160,6 +160,8 @@ mod tests {
     use itertools::Itertools;
     use rand;
     use rand::{distributions, distributions::Distribution, Rng};
+
+    // TODO test for file merging
 
     #[test]
     fn merged_iterator_works_random() {

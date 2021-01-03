@@ -15,19 +15,20 @@ use std::{collections, fs, io, path};
 
 #[path = "analyze_hprof/class_hierarchy_dot.rs"]
 mod class_hierarchy_dot;
+#[path = "analyze_hprof/counter.rs"]
+mod counter;
 #[path = "analyze_hprof/dot.rs"]
 mod dot;
 #[path = "analyze_hprof/dump_objects.rs"]
 mod dump_objects;
-#[path = "analyze_hprof/ref_count_graph.rs"]
-mod ref_count_graph;
-#[path = "analyze_hprof/util.rs"]
-mod util;
-
 #[path = "analyze_hprof/index/mod.rs"]
 mod index;
 #[path = "analyze_hprof/instance_counts.rs"]
 mod instance_counts;
+#[path = "analyze_hprof/ref_count_graph.rs"]
+mod ref_count_graph;
+#[path = "analyze_hprof/util.rs"]
+mod util;
 
 use crate::index::{lmdb::LmdbIndex, HprofFingerprint, Index};
 use util::*;

@@ -17,7 +17,7 @@ pub fn dump_objects(hprof: &Hprof) {
     let missing_utf8 = "(missing utf8)";
 
     // build obj -> class and class id -> class metadata maps
-
+    // TODO use index
     hprof
         .records_iter()
         .map(|r| r.unwrap())

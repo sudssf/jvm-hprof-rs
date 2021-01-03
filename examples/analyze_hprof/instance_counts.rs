@@ -2,10 +2,11 @@ use anyhow;
 use csv;
 use rayon;
 
+use crate::counter::Counter;
 use itertools::Itertools;
 use jvm_hprof::{heap_dump::*, *};
 use rayon::iter::{ParallelBridge, ParallelIterator};
-use std::{collections, hash, io, ops};
+use std::{collections, io, ops};
 
 pub(crate) fn instance_counts(hprof: &Hprof) -> Result<(), anyhow::Error> {
     let accumulated_state: InstanceCountRecordState = hprof
@@ -41,26 +42,15 @@ pub(crate) fn instance_counts(hprof: &Hprof) -> Result<(), anyhow::Error> {
                                 state.classes.insert(c.obj_id(), c);
                             }
                             SubRecord::Instance(instance) => {
-                                state
-                                    .instance_counts
-                                    .entry(instance.class_obj_id())
-                                    .and_modify(|count| *count += 1)
-                                    .or_insert(1_u64);
+                                state.instance_counts.increment(instance.class_obj_id())
                             }
-                            SubRecord::ObjectArray(obj_array) => {
-                                state
-                                    .instance_counts
-                                    .entry(obj_array.array_class_obj_id())
-                                    .and_modify(|count| *count += 1)
-                                    .or_insert(1_u64);
-                            }
+                            SubRecord::ObjectArray(obj_array) => state
+                                .instance_counts
+                                .increment(obj_array.array_class_obj_id()),
                             SubRecord::PrimitiveArray(pa) => {
-                                state
-                                    .prim_array_counts
-                                    .entry(pa.primitive_type())
-                                    .and_modify(|count| *count += 1)
-                                    .or_insert(1_u64);
+                                state.prim_array_counts.increment(pa.primitive_type())
                             }
+
                             _ => {}
                         };
                     }
@@ -130,53 +120,20 @@ struct InstanceCountRecordState<'a> {
     classes: collections::HashMap<Id, Class<'a>>,
 
     // class id -> count
-    instance_counts: collections::HashMap<Id, u64>,
-    prim_array_counts: collections::HashMap<PrimitiveArrayType, u64>,
+    instance_counts: Counter<Id>,
+    prim_array_counts: Counter<PrimitiveArrayType>,
 }
 
 /// Merges the underlying data
 impl<'a> ops::AddAssign for InstanceCountRecordState<'a> {
     fn add_assign(&mut self, rhs: Self) {
         // union the maps that store records
-        rhs.load_classes.drain_into(&mut self.load_classes);
-        rhs.utf8.drain_into(&mut self.utf8);
-        rhs.classes.drain_into(&mut self.classes);
+        self.load_classes.extend(rhs.load_classes.into_iter());
+        self.utf8.extend(rhs.utf8.into_iter());
+        self.classes.extend(rhs.classes.into_iter());
 
         // sum the counts for count maps
-        rhs.instance_counts
-            .drain_into_sum(&mut self.instance_counts, |l, r| l + r);
-        rhs.prim_array_counts
-            .drain_into_sum(&mut self.prim_array_counts, |l, r| l + r);
-    }
-}
-
-trait DrainInto<T> {
-    fn drain_into(self, dest: &mut T);
-}
-
-/// Insert the entries of `self` into `dest`, overwriting on duplicate keys
-impl<K: Eq + hash::Hash, V> DrainInto<collections::HashMap<K, V>> for collections::HashMap<K, V> {
-    fn drain_into(self, dest: &mut collections::HashMap<K, V>) {
-        self.into_iter().for_each(|(k, v)| {
-            dest.insert(k, v);
-        });
-    }
-}
-
-trait DrainIntoSum<T, E, S: Fn(E, E) -> E> {
-    /// Drain `self` into `dest`, combining elements of type `E` via sum function `S`
-    fn drain_into_sum(self, dest: &mut T, sum: S);
-}
-
-/// Impl for maps with u64 values that just adds the values
-impl<K: Eq + hash::Hash, S: Fn(u64, u64) -> u64> DrainIntoSum<collections::HashMap<K, u64>, u64, S>
-    for collections::HashMap<K, u64>
-{
-    fn drain_into_sum(self, dest: &mut collections::HashMap<K, u64>, sum: S) {
-        self.into_iter().for_each(|(k, v)| {
-            dest.entry(k)
-                .and_modify(|count| *count = sum(*count, v))
-                .or_insert(v);
-        })
+        self.instance_counts += rhs.instance_counts;
+        self.prim_array_counts += rhs.prim_array_counts;
     }
 }
