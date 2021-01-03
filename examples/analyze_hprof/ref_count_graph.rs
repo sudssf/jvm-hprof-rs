@@ -4,6 +4,7 @@ use jvm_hprof::{heap_dump::*, *};
 
 use crate::counter::Counter;
 use crate::index::Index;
+use rayon::iter::{ParallelBridge, ParallelIterator};
 use std::io::{self, Write};
 use std::{collections, fs, path};
 
@@ -22,6 +23,8 @@ pub fn ref_count_graph<I: Index>(
     let mut classes: collections::HashMap<Id, EzClass> = collections::HashMap::new();
 
     let missing_utf8 = "(missing utf8)";
+
+    println!("Loading classes");
 
     // this pass already goes at about 1G/s on one core, so the available speedup from parallelizing
     // isn't very high before i/o is saturated anyway
@@ -59,8 +62,6 @@ pub fn ref_count_graph<I: Index>(
 
     // iterate over objects and accumulate edge counts
 
-    let mut graph_edges: Counter<GraphEdge> = Counter::new();
-
     let id_size = hprof.header().id_size();
 
     // look in all the possible places an object id might be to build the right type of destination
@@ -78,33 +79,33 @@ pub fn ref_count_graph<I: Index>(
                 Some(d) => Ok(Some(d)),
             })
             .map(|dest_opt|
-                    // neither index lookup worked, so try classes
-                    match dest_opt {
-                        None => classes
-                            .get(&obj_id)
-                            .map(|_dest_class| HeapGraphDest::ClassObj {
-                                class_obj_id: obj_id,
-                            }),
-                        Some(d) => Some(d)
-                    })
+                // neither index lookup worked, so try classes
+                match dest_opt {
+                    None => classes
+                        .get(&obj_id)
+                        .map(|_dest_class| HeapGraphDest::ClassObj {
+                            class_obj_id: obj_id,
+                        }),
+                    Some(d) => Some(d)
+                })
             // error is unrecoverable anyway, might as well just crash
             .expect("Error when reading index")
     };
 
-    let mut bump_edge_counter = |source: HeapGraphSource, dest: HeapGraphDest| {
-        graph_edges.increment(GraphEdge { source, dest })
-    };
-
-    // TODO parallelize?
-
+    println!("Calculating reference counts");
     println!(". = 1,000,000 heap dump segment sub records");
-    let mut sub_records = 0_u64;
-    hprof
+    let mut all_graph_edges = hprof
         .records_iter()
+        .par_bridge()
+        .panic_fuse()
         .map(|r| r.unwrap())
-        .for_each(|r| match r.tag() {
+        .map(|r| match r.tag() {
             RecordTag::HeapDump | RecordTag::HeapDumpSegment => {
                 let segment = r.as_heap_dump_segment().unwrap().unwrap();
+                let mut sub_records = 0_u64;
+
+                let mut graph_edges: Counter<GraphEdge> = Counter::new();
+
                 for p in segment.sub_records() {
                     let s = p.unwrap();
 
@@ -112,8 +113,9 @@ pub fn ref_count_graph<I: Index>(
 
                     if sub_records == 1_000_000 {
                         sub_records = 0;
+                        // we won't print a . for leftover sub records beyond multiples of 1M, but meh
                         print!(".");
-                        // TODO
+                        // TODO unwrap
                         io::stdout().flush().unwrap();
                     }
 
@@ -123,7 +125,7 @@ pub fn ref_count_graph<I: Index>(
                                 "Could not find any match for obj {:?} in GcRootUnknown",
                                 gc_root.obj_id(),
                             ),
-                            Some(dest) => bump_edge_counter(HeapGraphSource::GcRootUnknown, dest)
+                            Some(dest) => graph_edges.increment(GraphEdge { source: HeapGraphSource::GcRootUnknown, dest })
                         },
                         SubRecord::GcRootThreadObj(gc_root) => gc_root.thread_obj_id().iter().for_each(|obj_id| {
                             match edge_dest_for_obj_id(*obj_id) {
@@ -131,7 +133,7 @@ pub fn ref_count_graph<I: Index>(
                                     "Could not find any match for obj {:?} in GcRootThreadObj",
                                     obj_id,
                                 ),
-                                Some(dest) => bump_edge_counter(HeapGraphSource::GcRootThreadObj, dest)
+                                Some(dest) => graph_edges.increment(GraphEdge { source: HeapGraphSource::GcRootThreadObj, dest })
                             }
                         }),
                         SubRecord::GcRootJniGlobal(gc_root) => match edge_dest_for_obj_id(gc_root.obj_id()) {
@@ -139,49 +141,49 @@ pub fn ref_count_graph<I: Index>(
                                 "Could not find any match for obj {:?} in GcRootJniGlobal",
                                 gc_root.obj_id(),
                             ),
-                            Some(dest) => bump_edge_counter(HeapGraphSource::GcRootJniGlobal, dest)
+                            Some(dest) => graph_edges.increment(GraphEdge { source: HeapGraphSource::GcRootJniGlobal, dest })
                         },
                         SubRecord::GcRootJniLocalRef(gc_root) => match edge_dest_for_obj_id(gc_root.obj_id()) {
                             None => eprintln!(
                                 "Could not find any match for obj {:?} in GcRootJniLocalRef",
                                 gc_root.obj_id(),
                             ),
-                            Some(dest) => bump_edge_counter(HeapGraphSource::GcRootJniLocalRef, dest)
+                            Some(dest) => graph_edges.increment(GraphEdge { source: HeapGraphSource::GcRootJniLocalRef, dest })
                         },
                         SubRecord::GcRootJavaStackFrame(gc_root) => match edge_dest_for_obj_id(gc_root.obj_id()) {
                             None => eprintln!(
                                 "Could not find any match for obj {:?} in GcRootJavaStackFrame",
                                 gc_root.obj_id(),
                             ),
-                            Some(dest) => bump_edge_counter(HeapGraphSource::GcRootJavaStackFrame, dest)
+                            Some(dest) => graph_edges.increment(GraphEdge { source: HeapGraphSource::GcRootJavaStackFrame, dest })
                         },
                         SubRecord::GcRootNativeStack(gc_root) => match edge_dest_for_obj_id(gc_root.obj_id()) {
                             None => eprintln!(
                                 "Could not find any match for obj {:?} in GcRootNativeStack",
                                 gc_root.obj_id(),
                             ),
-                            Some(dest) => bump_edge_counter(HeapGraphSource::GcRootNativeStack, dest)
+                            Some(dest) => graph_edges.increment(GraphEdge { source: HeapGraphSource::GcRootNativeStack, dest })
                         },
                         SubRecord::GcRootSystemClass(gc_root) => match edge_dest_for_obj_id(gc_root.obj_id()) {
                             None => eprintln!(
                                 "Could not find any match for obj {:?} in GcRootSystemClass",
                                 gc_root.obj_id(),
                             ),
-                            Some(dest) => bump_edge_counter(HeapGraphSource::GcRootSystemClass, dest)
+                            Some(dest) => graph_edges.increment(GraphEdge { source: HeapGraphSource::GcRootSystemClass, dest })
                         },
                         SubRecord::GcRootThreadBlock(gc_root) => match edge_dest_for_obj_id(gc_root.obj_id()) {
                             None => eprintln!(
                                 "Could not find any match for obj {:?} in GcRootThreadBlock",
                                 gc_root.obj_id(),
                             ),
-                            Some(dest) => bump_edge_counter(HeapGraphSource::GcRootThreadBlock, dest)
+                            Some(dest) => graph_edges.increment(GraphEdge { source: HeapGraphSource::GcRootThreadBlock, dest })
                         },
                         SubRecord::GcRootBusyMonitor(gc_root) => match edge_dest_for_obj_id(gc_root.obj_id()) {
                             None => eprintln!(
                                 "Could not find any match for obj {:?} in GcRootBusyMonitor",
                                 gc_root.obj_id(),
                             ),
-                            Some(dest) => bump_edge_counter(HeapGraphSource::GcRootBusyMonitor, dest)
+                            Some(dest) => graph_edges.increment(GraphEdge { source: HeapGraphSource::GcRootBusyMonitor, dest })
                         },
                         SubRecord::PrimitiveArray(_) => { /* primitive arrays have no refs */ }
                         SubRecord::Class(c) => {
@@ -206,7 +208,7 @@ pub fn ref_count_graph<I: Index>(
                                                     mc.name,
                                                     utf8.get(&sf.name_id()).unwrap_or(&missing_utf8)
                                                 ),
-                                                Some(dest) => bump_edge_counter(source, dest)
+                                                Some(dest) => graph_edges.increment(GraphEdge { source, dest })
                                             }
                                         }
                                         _ => {}
@@ -245,7 +247,7 @@ pub fn ref_count_graph<I: Index>(
                                                 mc.name,
                                                 utf8.get(&fd.name_id()).unwrap_or(&missing_utf8)
                                             ),
-                                            Some(dest) => bump_edge_counter(source, dest)
+                                            Some(dest) => graph_edges.increment(GraphEdge { source, dest })
                                         }
                                     }
                                     _ => {}
@@ -270,26 +272,34 @@ pub fn ref_count_graph<I: Index>(
                                             obj_array.array_class_obj_id(),
                                             mc.name
                                         ),
-                                        Some(dest) => bump_edge_counter(source, dest)
+                                        Some(dest) => graph_edges.increment(GraphEdge { source, dest })
                                     }
                                 })
                         }
                     }
                 }
+
+                graph_edges
             }
-            _ => {}
-        });
+            // empty counter for other cases
+            _ => Counter::new()
+        })
+        .reduce(|| Counter::new(),
+                |mut acc, x| {
+                    acc += x;
+                    acc
+                });
 
     println!();
 
-    graph_edges.retain(|_edge, count| *count >= min_edge_count);
+    all_graph_edges.retain(|_edge, count| *count >= min_edge_count);
 
     let mut output_file = fs::File::create(output).unwrap();
 
     writeln!(output_file, "digraph G {{").unwrap();
 
     // for each class referenced, add a node with all the fields
-    graph_edges
+    all_graph_edges
         .iter()
         .map(|(k, _v)| k)
         .filter_map(|edge| match edge.source {
@@ -299,7 +309,7 @@ pub fn ref_count_graph<I: Index>(
             _ => None,
         })
         .chain(
-            graph_edges
+            all_graph_edges
                 .iter()
                 .map(|(k, _v)| k)
                 .filter_map(|edge| match edge.dest {
@@ -325,7 +335,7 @@ pub fn ref_count_graph<I: Index>(
         });
 
     // gc roots
-    graph_edges
+    all_graph_edges
         .iter()
         .map(|(k, _v)| k)
         .filter(|edge| match edge.source {
@@ -355,7 +365,7 @@ pub fn ref_count_graph<I: Index>(
         });
 
     // primitive arrays
-    graph_edges
+    all_graph_edges
         .iter()
         .map(|(k, _v)| k)
         .filter_map(|edge| match edge.dest {
@@ -378,7 +388,7 @@ pub fn ref_count_graph<I: Index>(
 
     // now, write all the edges
 
-    graph_edges.iter().for_each(|(edge, &count)| {
+    all_graph_edges.iter().for_each(|(edge, &count)| {
         edge.write_dot_edge(count, &mut output_file).unwrap();
     });
 

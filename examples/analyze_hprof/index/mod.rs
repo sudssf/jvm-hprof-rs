@@ -94,7 +94,7 @@ pub(crate) fn build_index(hprof: &Hprof, output: &path::Path) -> Result<(), anyh
 }
 
 // Sized so Self can be used in return types
-pub trait Index: Sized {
+pub trait Index: Sized + Sync {
     /// Open the index at the provided path, and make sure that its stored fingerprint matches
     /// `fingerprint`
     fn open_with_fingerprint(
