@@ -128,8 +128,8 @@ impl GcRootThreadObj {
             input,
             GcRootThreadObj {
                 thread_obj_id,
-                thread_serial,
-                stack_trace_serial,
+                thread_serial: thread_serial.into(),
+                stack_trace_serial: stack_trace_serial.into(),
             },
         ))
     }
@@ -174,13 +174,13 @@ impl GcRootJniLocalRef {
         // https://github.com/openjdk/jdk/blob/08822b4e0526fe001c39fe08e241b849eddf481d/src/hotspot/share/services/heapDumper.cpp#L196
         let (input, obj_id) = Id::parse(input, id_size)?;
         let (input, thread_serial) = number::be_u32(input)?;
-        let (input, frame_index) = parse_optional_serial(input)?;
+        let (input, frame_index) = parse_optional_u32(input)?;
 
         Ok((
             input,
             GcRootJniLocalRef {
                 obj_id,
-                thread_serial,
+                thread_serial: thread_serial.into(),
                 frame_index,
             },
         ))
@@ -202,13 +202,13 @@ impl GcRootJavaStackFrame {
         // https://github.com/openjdk/jdk/blob/08822b4e0526fe001c39fe08e241b849eddf481d/src/hotspot/share/services/heapDumper.cpp#L202
         let (input, obj_id) = Id::parse(input, id_size)?;
         let (input, thread_serial) = number::be_u32(input)?;
-        let (input, frame_index) = parse_optional_serial(input)?;
+        let (input, frame_index) = parse_optional_u32(input)?;
 
         Ok((
             input,
             GcRootJavaStackFrame {
                 obj_id,
-                thread_serial,
+                thread_serial: thread_serial.into(),
                 frame_index,
             },
         ))
@@ -233,7 +233,7 @@ impl GcRootNativeStack {
             input,
             GcRootNativeStack {
                 obj_id,
-                thread_serial,
+                thread_serial: thread_serial.into(),
             },
         ))
     }
@@ -272,7 +272,7 @@ impl GcRootThreadBlock {
             input,
             GcRootThreadBlock {
                 obj_id,
-                thread_serial,
+                thread_serial: thread_serial.into(),
             },
         ))
     }
@@ -390,7 +390,7 @@ impl<'a> Class<'a> {
             Class {
                 id_size,
                 obj_id,
-                stack_trace_serial,
+                stack_trace_serial: stack_trace_serial.into(),
                 super_class_obj_id,
                 class_loader_obj_id,
                 signers_obj_id,
@@ -455,7 +455,7 @@ impl<'a> Instance<'a> {
             input,
             Instance {
                 obj_id,
-                stack_trace_serial,
+                stack_trace_serial: stack_trace_serial.into(),
                 class_obj_id,
                 fields,
             },
@@ -491,7 +491,7 @@ impl<'a> ObjectArray<'a> {
             input,
             ObjectArray {
                 obj_id,
-                stack_trace_serial,
+                stack_trace_serial: stack_trace_serial.into(),
                 array_class_obj_id: array_class_id,
                 num_elements,
                 contents,
@@ -658,7 +658,7 @@ fn parse_optional_id(input: &[u8], id_size: IdSize) -> nom::IResult<&[u8], Optio
     })
 }
 
-fn parse_optional_serial(input: &[u8]) -> nom::IResult<&[u8], Option<Serial>> {
+fn parse_optional_u32(input: &[u8]) -> nom::IResult<&[u8], Option<u32>> {
     number::be_u32(input).map(|(input, index)| {
         if index == u32::max_value() {
             (input, None)

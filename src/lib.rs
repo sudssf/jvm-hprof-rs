@@ -1,3 +1,49 @@
+//! A library for parsing hprof files.
+//!
+//! See [parse_hprof] to get started, or see the examples in the repo.
+//!
+//! # Examples
+//!
+//! Iterating across all records to count how many of each record type there are (adapted from
+//! the `analyze_hprof` example's `record-counts` subcommand):
+//!
+//! ```
+//! use std::{fs, collections};
+//! use jvm_hprof::{Hprof, parse_hprof, RecordTag};
+//! use strum::IntoEnumIterator;
+//! use itertools::Itertools;
+//!
+//! fn count_records(file: fs::File) {
+//!     let memmap = unsafe { memmap::MmapOptions::new().map(&file) }.unwrap();
+//!
+//!     let hprof: Hprof = parse_hprof(&memmap[..]).unwrap();
+//!
+//!     // start with zero counts for all types
+//!     let mut counts = RecordTag::iter()
+//!         .map(|r| (r, 0_u64))
+//!         .collect::<collections::HashMap<RecordTag, u64>>();
+//!
+//!     // overwrite zeros with real counts for each record that exists in the hprof
+//!     hprof
+//!         .records_iter()
+//!         .map(|r| r.unwrap().tag())
+//!         .for_each(|tag| {
+//!             counts.entry(tag).and_modify(|c| *c += 1).or_insert(1);
+//!         });
+//!
+//!     let mut counts: Vec<(RecordTag, u64)> = counts
+//!         .into_iter()
+//!         .sorted_by_key(|&(_, count)| count)
+//!         .collect::<Vec<(jvm_hprof::RecordTag, u64)>>();
+//!
+//!     // highest count on top
+//!     counts.reverse();
+//!
+//!     for (tag, count) in counts {
+//!         println!("{:?}: {}", tag, count);
+//!     }
+//! }
+//! ```
 use getset::CopyGetters;
 use nom::bytes::complete as bytes;
 use nom::number::complete as number;
@@ -12,6 +58,9 @@ mod parsing_iterator;
 
 use parsing_iterator::*;
 
+/// Ids are used to identify many things in an hprof file: objects, classes, utf8 blobs, etc.
+///
+/// The on-disk representation of an Id depends on the relevant [IdSize].
 #[derive(CopyGetters, Copy, Clone, Debug, Eq, Hash, PartialEq)]
 pub struct Id {
     // inflate 4-byte ids to 8-byte since if we have a small 32-bit heap, no worries about memory anyway
@@ -26,18 +75,48 @@ impl From<u64> for Id {
 }
 
 impl fmt::Display for Id {
-    fn fmt(&self, f: &mut Formatter<'_>) -> Result<(), Error> {
+    fn fmt(&self, f: &mut Formatter<'_>) -> fmt::Result {
         write!(f, "{}", self.id)
     }
 }
 
 impl fmt::UpperHex for Id {
-    fn fmt(&self, f: &mut Formatter<'_>) -> Result<(), Error> {
+    fn fmt(&self, f: &mut Formatter<'_>) -> fmt::Result {
         fmt::UpperHex::fmt(&self.id, f)
     }
 }
 
-pub type Serial = u32;
+/// An alternate means of identification used in parallel with [Id].
+///
+/// [LoadClass], for instance, has both a `class_obj_id` and a `serial`. In certain cases you might
+/// need to use one or the other. If you were processing [StackFrame] records and wanted to print
+/// human readable class names (which are available in [LoadClass], [StackFrame] uses
+/// `class_serial`, whereas if you were inspecting a class's fields via [crate::heap_dump::Class],
+/// that only has the class's `obj_id` available.
+#[derive(CopyGetters, Copy, Clone, Debug, Eq, Hash, PartialEq)]
+pub struct Serial {
+    /// The plain serial number.
+    #[get_copy = "pub"]
+    num: u32,
+}
+
+impl From<u32> for Serial {
+    fn from(num: u32) -> Self {
+        Serial { num }
+    }
+}
+
+impl fmt::Display for Serial {
+    fn fmt(&self, f: &mut Formatter<'_>) -> fmt::Result {
+        write!(f, "{}", self.num)
+    }
+}
+
+impl fmt::UpperHex for Serial {
+    fn fmt(&self, f: &mut Formatter<'_>) -> fmt::Result {
+        fmt::UpperHex::fmt(&self.num, f)
+    }
+}
 
 impl StatelessParserWithId for Id {
     fn parse(input: &[u8], id_size: IdSize) -> nom::IResult<&[u8], Self> {
@@ -50,6 +129,9 @@ impl StatelessParserWithId for Id {
     }
 }
 
+/// Hprof ids can be 32 or 64 bit, depending on the system and JVM that the hprof was captured on.
+///
+/// This controls how ids are parsed, and can generally be otherwise ignored.
 #[derive(Debug, Clone, Copy)]
 pub enum IdSize {
     U32,
@@ -65,8 +147,8 @@ impl IdSize {
     }
 }
 
+/// The top level of data loaded from an .hprof file.
 // https://github.com/openjdk/jdk/blob/08822b4e0526fe001c39fe08e241b849eddf481d/src/hotspot/share/services/heapDumper.cpp
-
 #[derive(CopyGetters)]
 pub struct Hprof<'a> {
     #[get_copy = "pub"]
@@ -75,6 +157,9 @@ pub struct Hprof<'a> {
 }
 
 impl<'a> Hprof<'a> {
+    /// Iterate over the [Record] data in the hprof.
+    ///
+    /// Iteration is cheap, as each [Record] defers parsing the bulk of its data until later.
     pub fn records_iter(&self) -> Records<'a> {
         Records {
             remaining: self.records,
@@ -83,6 +168,10 @@ impl<'a> Hprof<'a> {
     }
 }
 
+/// Entry point for parsing.
+///
+/// This is intended to be used with a memory mapped hprof file, or, for small heap dumps that can
+/// fit comfortably in memory, just an in-memory buffer.
 pub fn parse_hprof(input: &[u8]) -> ParseResult<Hprof> {
     let (input, header) = Header::parse(input)?;
 
@@ -92,6 +181,7 @@ pub fn parse_hprof(input: &[u8]) -> ParseResult<Hprof> {
     })
 }
 
+/// Basic metadata about the hprof
 #[derive(CopyGetters, Copy, Clone)]
 pub struct Header<'a> {
     label: &'a [u8],
@@ -146,6 +236,7 @@ impl<'a> fmt::Debug for Header<'a> {
     }
 }
 
+/// Iterator over the [Record] data in an hprof.
 pub struct Records<'a> {
     remaining: &'a [u8],
     id_size: IdSize,
@@ -170,10 +261,50 @@ impl<'a> Iterator for Records<'a> {
     }
 }
 
+/// The next level down from the [Hprof] in the hierarchy of data.
+///
+/// Records are generic and lightweight: the parsing done to get a Record is just loading a couple
+/// of bytes to get the tag and timestamp, and a slice that contains the "body" of the record, so
+/// iterating across all Records without inspecting the body of each one is cheap. Even huge heap
+/// dumps might have only tens of thousands of Records.
+///
+/// See [RecordTag] for the different types of data that can be in a Record.
+///
+/// # Examples
+///
+/// Because enum variants in Rust can't (yet) have methods that exist only for one variant, parsing
+/// the body of the record is done via `as_*` methods like `as_utf_8()`. If the tag of a given
+/// record is `[RecordTag::Utf8]`, then `as_utf_8()` will return `Some(...)`, and all other `as_...`
+/// will return `None`, and so forth. So, in practice, this might look like:
+///
+/// ```
+/// use jvm_hprof::{Record, RecordTag, Utf8};
+///
+/// fn print_utf8(record: &Record) {
+///     match record.tag() {
+///         RecordTag::Utf8 => {
+///             // unwrap strips the Option(),
+///             // which we know is Some because of the tag
+///             let utf8: Utf8 = record.as_utf_8().unwrap()
+///                 // apply real error handling as needed
+///                 .expect("parsing error -- corrupt hprof? Bug in parser?");
+///
+///             // build a str from the bytes, validating UTF-8
+///             let utf_str: &str = utf8.text_as_str()
+///                 .expect("Surely the JVM wouldn't write a Utf8 record with invalid UTF-8");
+///
+///             println!("utf8 contents: {}", utf_str);
+///         }
+///         _ => println!("tag was {:?}, not utf8", record.tag())
+///     }
+/// }
+/// ```
 #[derive(CopyGetters, Copy, Clone)]
 pub struct Record<'a> {
+    /// The tag, which determines which of the `as_*` methods it is suitable to call.
     #[get_copy = "pub"]
     tag: RecordTag,
+    /// Microseconds since the timestamp in the header
     #[get_copy = "pub"]
     micros_since_header_ts: u32,
     id_size: IdSize,
@@ -181,6 +312,7 @@ pub struct Record<'a> {
 }
 
 impl<'a> Record<'a> {
+    /// Returns `Some` if the tag is [RecordTag::Utf8] and `None` otherwise.
     pub fn as_utf_8(&self) -> Option<ParseResult<Utf8<'a>>> {
         match self.tag {
             RecordTag::Utf8 => Some(Utf8::parse(self.body, self.id_size)),
@@ -188,6 +320,7 @@ impl<'a> Record<'a> {
         }
     }
 
+    /// Returns `Some` if the tag is [RecordTag::LoadClass] and `None` otherwise.
     pub fn as_load_class(&self) -> Option<ParseResult<LoadClass>> {
         match self.tag {
             RecordTag::LoadClass => Some(LoadClass::parse(self.body, self.id_size)),
@@ -195,6 +328,7 @@ impl<'a> Record<'a> {
         }
     }
 
+    /// Returns `Some` if the tag is [RecordTag::StackFrame] and `None` otherwise.
     pub fn as_stack_frame(&self) -> Option<ParseResult<StackFrame>> {
         match self.tag {
             RecordTag::StackFrame => Some(StackFrame::parse(self.body, self.id_size)),
@@ -202,6 +336,7 @@ impl<'a> Record<'a> {
         }
     }
 
+    /// Returns `Some` if the tag is [RecordTag::StackTrace] and `None` otherwise.
     pub fn as_stack_trace(&self) -> Option<ParseResult<StackTrace<'a>>> {
         match self.tag {
             RecordTag::StackTrace => Some(StackTrace::parse(self.body, self.id_size)),
@@ -209,6 +344,8 @@ impl<'a> Record<'a> {
         }
     }
 
+    /// Returns `Some` if the tag is [RecordTag::HeapDump] or [RecordTag::HeapDumpSegment] and
+    /// `None` otherwise.
     pub fn as_heap_dump_segment(&self) -> Option<ParseResult<HeapDumpSegment<'a>>> {
         match self.tag {
             RecordTag::HeapDump | RecordTag::HeapDumpSegment => {
@@ -256,22 +393,40 @@ impl<'a> Record<'a> {
     }
 }
 
+/// Indicates what type of data is contained in a particular [Record].
+///
+/// Each variant has a matching struct. Calling [Record::as_utf_8] on a `Record` with tag
+/// `RecordTag::Utf8`, for instance, will produce a [Utf8] struct.
 // Since this enum has no data, add EnumIter to allow enumerating across the variants
 #[derive(Debug, Copy, Clone, PartialEq, Eq, PartialOrd, Hash, EnumIter)]
 pub enum RecordTag {
+    /// See [Utf8]
     Utf8,
+    /// See [LoadClass]
     LoadClass,
+    /// Unused?
     UnloadClass,
+    /// See [StackFrame]
     StackFrame,
+    /// See [StackTrace]
     StackTrace,
+    /// Unused?
     AllocSites,
+    /// Unused?
     StartThread,
+    /// Unused?
     EndThread,
+    /// Unused?
     HeapSummary,
+    /// See [HeapDumpSegment]
     HeapDump,
+    /// Unused?
     CpuSamples,
+    /// Unused?
     ControlSettings,
+    /// See [HeapDumpSegment]
     HeapDumpSegment,
+    /// Denotes the end of a heap dump
     HeapDumpEnd,
 }
 
@@ -302,6 +457,7 @@ impl cmp::Ord for RecordTag {
     }
 }
 
+/// Contents of a [Record] with tag [RecordTag::Utf8].
 #[derive(CopyGetters, Copy, Clone)]
 pub struct Utf8<'a> {
     #[get_copy = "pub"]
@@ -327,6 +483,7 @@ impl<'a> Utf8<'a> {
     }
 }
 
+/// Contents of a [Record] with tag [RecordTag::LoadClass].
 #[derive(CopyGetters, Copy, Clone)]
 pub struct LoadClass {
     #[get_copy = "pub"]
@@ -348,9 +505,9 @@ impl LoadClass {
         let (_input, class_name_id) = Id::parse(input, id_size)?;
 
         Ok(LoadClass {
-            class_serial,
+            class_serial: class_serial.into(),
             class_obj_id,
-            stack_trace_serial,
+            stack_trace_serial: stack_trace_serial.into(),
             class_name_id,
         })
     }
@@ -362,6 +519,7 @@ struct UnloadClass {
     class_serial: Serial,
 }
 
+/// Contents of a [Record] with tag [RecordTag::StackFrame].
 #[derive(CopyGetters, Clone)]
 pub struct StackFrame {
     #[get_copy = "pub"]
@@ -394,12 +552,13 @@ impl StackFrame {
             method_name_id,
             method_signature_id,
             source_file_name_id,
-            class_serial,
+            class_serial: class_serial.into(),
             line_num,
         })
     }
 }
 
+/// Contents of a [Record] with tag [RecordTag::StackTrace].
 #[derive(CopyGetters, Clone)]
 pub struct StackTrace<'a> {
     id_size: IdSize,
@@ -420,8 +579,8 @@ impl<'a> StackTrace<'a> {
 
         Ok(StackTrace {
             id_size,
-            stack_trace_serial,
-            thread_serial,
+            stack_trace_serial: stack_trace_serial.into(),
+            thread_serial: thread_serial.into(),
             num_frame_ids,
             frame_ids: input,
         })
@@ -475,7 +634,7 @@ struct HeapSummary {
     total_live_bytes: u32,
 }
 
-/// Represents either a HPROF_HEAP_DUMP or HPROF_HEAP_DUMP_SEGMENT
+/// Contents of a [Record] with tag [RecordTag::HeapDump] or [RecordTag::HeapDumpSegment].
 pub struct HeapDumpSegment<'a> {
     id_size: IdSize,
     records: &'a [u8],
@@ -497,6 +656,7 @@ impl<'a> HeapDumpSegment<'a> {
     }
 }
 
+/// Iterator over [heap_dump::SubRecord] data.
 pub struct SubRecords<'a> {
     id_size: IdSize,
     remaining: &'a [u8],
@@ -536,8 +696,10 @@ struct ControlSettings {
     stack_trace_depth: u16,
 }
 
+/// A line referenced from a stack frame.
 #[derive(Copy, Clone, Debug)]
 pub enum LineNum {
+    /// A line in a source file
     Normal(u32),
     Unknown,
     CompiledMethod,
@@ -670,6 +832,7 @@ struct AllocSite {
     num_instances_allocated: u32,
 }
 
+/// Iterator that parses ids.
 pub struct Ids<'a> {
     iter: ParsingIterator<'a, Id, IdSizeParserWrapper<Id>>,
 }

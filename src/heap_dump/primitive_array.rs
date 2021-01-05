@@ -59,7 +59,7 @@ impl<'a> PrimitiveArray<'a> {
             input,
             PrimitiveArray {
                 obj_id,
-                stack_trace_serial,
+                stack_trace_serial: stack_trace_serial.into(),
                 primitive_type: array_type,
                 num_elements,
                 contents,
