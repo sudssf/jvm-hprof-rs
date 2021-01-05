@@ -3,13 +3,20 @@ use crate::*;
 use strum_macros;
 use strum_macros::EnumIter;
 
-/// Methods for accessing the contents of the array always return Some for method matching the array type and None otherwise (e.g. if it's a PrimitiveArrayType::Float, floats() will always be Some.
+/// An array of [JVM primitive types](https://docs.oracle.com/javase/specs/jvms/se15/html/jvms-2.html#jvms-2.3)
+/// (`int`, `long`, and so forth).
+///
 #[derive(CopyGetters)]
 pub struct PrimitiveArray<'a> {
     #[get_copy = "pub"]
     obj_id: Id,
     #[get_copy = "pub"]
     stack_trace_serial: Serial,
+    /// The type of primitive in the array.
+    ///
+    /// Methods for accessing the contents of the array (`ints()`, etc)  return `Some` for method
+    /// matching the array type and `None` otherwise (e.g. if it's a [PrimitiveArrayType::Float],
+    /// [PrimitiveArray::floats()] will return `Some` and all other accessors will return `None`.
     #[get_copy = "pub"]
     primitive_type: PrimitiveArrayType,
     num_elements: u32,
@@ -18,6 +25,7 @@ pub struct PrimitiveArray<'a> {
 
 macro_rules! iterator_method {
     ($method_name:tt, $type_variant:tt, $iter_struct:tt) => {
+        /// Returns `Some` if `primitive_type()` returns the matching variant and `None` otherwise.
         pub fn $method_name(&self) -> Option<$iter_struct> {
             match self.primitive_type {
                 PrimitiveArrayType::$type_variant => Some($iter_struct {

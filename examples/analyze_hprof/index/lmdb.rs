@@ -211,13 +211,13 @@ impl<T: lmdb::Transaction> LmdbTxnExt for T {
 mod tests {
     use super::*;
     use anyhow;
+    use jvm_hprof::EnumIterable;
     use rand;
     use tempfile;
 
     use rand::seq::SliceRandom;
     use rand::Rng;
     use std::io;
-    use strum::IntoEnumIterator;
 
     #[test]
     fn build_index_from_seq() -> Result<(), anyhow::Error> {

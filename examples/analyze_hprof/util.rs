@@ -1,6 +1,5 @@
 use jvm_hprof::{heap_dump::*, *};
 use std::collections;
-use strum::IntoEnumIterator;
 
 /// A somewhat more convenient representation of a Class together with its name from the corresponding LoadClass
 pub struct EzClass<'a> {

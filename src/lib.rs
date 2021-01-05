@@ -9,9 +9,7 @@
 //!
 //! ```
 //! use std::{fs, collections};
-//! use jvm_hprof::{Hprof, parse_hprof, RecordTag};
-//! use strum::IntoEnumIterator;
-//! use itertools::Itertools;
+//! use jvm_hprof::{Hprof, parse_hprof, RecordTag, EnumIterable};
 //!
 //! fn count_records(file: fs::File) {
 //!     let memmap = unsafe { memmap::MmapOptions::new().map(&file) }.unwrap();
@@ -33,10 +31,10 @@
 //!
 //!     let mut counts: Vec<(RecordTag, u64)> = counts
 //!         .into_iter()
-//!         .sorted_by_key(|&(_, count)| count)
 //!         .collect::<Vec<(jvm_hprof::RecordTag, u64)>>();
 //!
 //!     // highest count on top
+//!     counts.sort_unstable_by_key(|&(_, count)| count);
 //!     counts.reverse();
 //!
 //!     for (tag, count) in counts {
@@ -263,12 +261,18 @@ impl<'a> Iterator for Records<'a> {
 
 /// The next level down from the [Hprof] in the hierarchy of data.
 ///
+/// See [RecordTag] for the different types of data that can be in a Record.
+///
+/// # Performance
+///
 /// Records are generic and lightweight: the parsing done to get a Record is just loading a couple
 /// of bytes to get the tag and timestamp, and a slice that contains the "body" of the record, so
 /// iterating across all Records without inspecting the body of each one is cheap. Even huge heap
 /// dumps might have only tens of thousands of Records.
 ///
-/// See [RecordTag] for the different types of data that can be in a Record.
+/// Since iterating records is very fast but parsing the contents may not be (e.g. a sequence of
+/// 2GiB [HeapDumpSegment] records), records are especially amenable to parallel processing, e.g.
+/// with rayon's `par_bridge()`.
 ///
 /// # Examples
 ///
@@ -635,6 +639,10 @@ struct HeapSummary {
 }
 
 /// Contents of a [Record] with tag [RecordTag::HeapDump] or [RecordTag::HeapDumpSegment].
+///
+/// Contains many [heap_dump::SubRecord]s.
+///
+/// See the [heap_dump] module.
 pub struct HeapDumpSegment<'a> {
     id_size: IdSize,
     records: &'a [u8],
@@ -648,6 +656,7 @@ impl<'a> HeapDumpSegment<'a> {
         })
     }
 
+    /// Iterate over the [heap_dump::SubRecord]s in this [Record].
     pub fn sub_records(&self) -> SubRecords<'a> {
         SubRecords {
             id_size: self.id_size,
@@ -846,3 +855,20 @@ impl<'a> Iterator for Ids<'a> {
 }
 
 type ParseResult<'e, T> = Result<T, nom::Err<(&'e [u8], nom::error::ErrorKind)>>;
+
+/// Allow iterating over enum variants for enums that have `#[derive(EnumIter)]`.
+///
+/// Wrapper around `strum`'s `IntoEnumIter` so that users don't need to know about `strum`
+pub trait EnumIterable {
+    type Iterator: Iterator<Item = Self>;
+
+    fn iter() -> Self::Iterator;
+}
+
+impl<T: strum::IntoEnumIterator> EnumIterable for T {
+    type Iterator = T::Iterator;
+
+    fn iter() -> Self::Iterator {
+        T::iter()
+    }
+}

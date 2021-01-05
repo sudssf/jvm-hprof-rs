@@ -1,3 +1,11 @@
+//! Sub records contained in [crate::HeapDumpSegment] records.
+//!
+//! # Performance
+//!
+//! Since sub records do not have a length prefix like records do, they cannot be almost entirely
+//! lazily parsed -- the contents of the sub record must be parsed to know how long a sub record is.
+//! That said, it is still reasonably fast at approximately 1GiB/s per core, and there is room to
+//! make parsing lazier should the need arise.
 use getset::{CopyGetters, Getters};
 
 use crate::*;
@@ -293,6 +301,10 @@ impl GcRootBusyMonitor {
     }
 }
 
+/// Analogous to a `java.lang.Class` object.
+///
+/// A notable absence from this is the class name, which is available via [crate::LoadClass]
+/// records.
 #[derive(CopyGetters)]
 pub struct Class<'a> {
     id_size: IdSize,
@@ -300,6 +312,7 @@ pub struct Class<'a> {
     obj_id: Id,
     #[get_copy = "pub"]
     stack_trace_serial: Serial,
+    /// `None` when there is no superclass, e.g. for `java.lang.Object`.
     #[get_copy = "pub"]
     super_class_obj_id: Option<Id>,
     #[get_copy = "pub"]
@@ -318,6 +331,7 @@ pub struct Class<'a> {
 }
 
 impl<'a> Class<'a> {
+    /// Iterate over [StaticFieldEntry] data.
     pub fn static_fields(&self) -> StaticFieldEntries {
         StaticFieldEntries {
             iter: ParsingIterator::new_stateless_id_size(
@@ -328,6 +342,12 @@ impl<'a> Class<'a> {
         }
     }
 
+    /// Iterate over [FieldDescriptor] data.
+    ///
+    /// Contains only the instance fields defined in this class, not in superclasses.
+    ///
+    /// An object's fields are serialized with the concrete type's fields first, then that class's
+    /// superclass, and so forth, up to the root of the hierarchy.
     pub fn instance_field_descriptors(&self) -> FieldDescriptors {
         FieldDescriptors {
             iter: ParsingIterator::new_stateless_id_size(
@@ -405,6 +425,7 @@ impl<'a> Class<'a> {
     }
 }
 
+/// Iterator over [StaticFieldEntry] for a [Class].
 pub struct StaticFieldEntries<'a> {
     iter: ParsingIterator<'a, StaticFieldEntry, IdSizeParserWrapper<StaticFieldEntry>>,
 }
@@ -417,6 +438,7 @@ impl<'a> Iterator for StaticFieldEntries<'a> {
     }
 }
 
+/// Iterator over [FieldDescriptor]s.
 pub struct FieldDescriptors<'a> {
     iter: ParsingIterator<'a, FieldDescriptor, IdSizeParserWrapper<FieldDescriptor>>,
 }
@@ -429,6 +451,7 @@ impl<'a> Iterator for FieldDescriptors<'a> {
     }
 }
 
+/// An instance of a reference type (i.e. not a primitive).
 #[derive(CopyGetters, Getters)]
 pub struct Instance<'a> {
     #[get_copy = "pub"]
@@ -437,7 +460,43 @@ pub struct Instance<'a> {
     stack_trace_serial: Serial,
     #[get_copy = "pub"]
     class_obj_id: Id,
-    /// Instance field values (class, followed by super, super's super ...)
+    /// Instance field values, root class's fields last.
+    ///
+    /// # Example
+    ///
+    /// Once you have assembled the class hierarchy and have accumulated all the field descriptors,
+    /// instance fields can be parsed like so (adapted from `print_field_val` in the examples):
+    ///
+    /// ```
+    /// use jvm_hprof::heap_dump::{FieldDescriptor, Instance, FieldValue};
+    /// use jvm_hprof::{Hprof, IdSize, Id};
+    /// use std::collections::HashMap;
+    ///
+    /// fn print_field_val(
+    ///     instance: Instance,
+    ///     field_descriptors: &[FieldDescriptor],
+    ///     id_size: IdSize,
+    ///     utf8: HashMap<Id, &str>
+    ///     ) {
+    ///    let mut field_val_input: &[u8] = instance.fields();
+    ///    for fd in field_descriptors.iter() {
+    ///        let (input, field_val) = fd
+    ///            .field_type()
+    ///            .parse_value(field_val_input, id_size)
+    ///            .unwrap();
+    ///        field_val_input = input;
+    ///        let field_name =
+    ///            utf8.get(&fd.name_id()).unwrap_or_else(|| &"missing");
+    ///
+    ///        match field_val {
+    ///            FieldValue::ObjectId(Some(id)) => println!("{}: ref to obj id {}", field_name, id),
+    ///            FieldValue::ObjectId(null) => println!("{}: ref to null", field_name),
+    ///            FieldValue::Int(i) => println!("{}: int {}", field_name, i),
+    ///            _ => { /* and so forth */ }
+    ///        }
+    ///    }
+    /// }
+    /// ```
     #[get = "pub"]
     fields: &'a [u8],
 }
@@ -463,12 +522,14 @@ impl<'a> Instance<'a> {
     }
 }
 
+/// An array of anything other than a primitive type.
 #[derive(CopyGetters)]
 pub struct ObjectArray<'a> {
     #[get_copy = "pub"]
     obj_id: Id,
     #[get_copy = "pub"]
     stack_trace_serial: Serial,
+    /// The obj id of the class that this is an array of
     #[get_copy = "pub"]
     array_class_obj_id: Id,
     num_elements: u32,
@@ -499,6 +560,7 @@ impl<'a> ObjectArray<'a> {
         ))
     }
 
+    /// The obj ids of the objects in the array
     pub fn elements(&self, id_size: IdSize) -> NullableIds {
         NullableIds {
             iter: ParsingIterator::new_stateless_id_size(id_size, self.contents, self.num_elements),
@@ -510,6 +572,7 @@ impl<'a> ObjectArray<'a> {
 #[allow(unused)]
 enum ConstantPoolEntry {}
 
+/// The field type and value for a static field in a [Class].
 #[derive(CopyGetters, Clone, Copy, Debug)]
 pub struct StaticFieldEntry {
     #[get_copy = "pub"]
@@ -551,6 +614,7 @@ pub enum FieldValue {
     Long(i64),
 }
 
+/// The name and type of an instance field.
 #[derive(CopyGetters, Clone, Copy, Debug)]
 pub struct FieldDescriptor {
     #[get_copy = "pub"]
@@ -668,6 +732,7 @@ fn parse_optional_u32(input: &[u8]) -> nom::IResult<&[u8], Option<u32>> {
     })
 }
 
+/// Iterator over object ids that may be null, represented as `Option<Id>`.
 pub struct NullableIds<'a> {
     iter: ParsingIterator<'a, Option<Id>, IdSizeParserWrapper<Option<Id>>>,
 }
