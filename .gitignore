@@ -1,6 +1,7 @@
 /target
 /.idea
 /tmp
+.DS_Store
 
 /dhat-heap.json
 /perf.data*
