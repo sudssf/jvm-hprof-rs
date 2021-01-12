@@ -32,9 +32,9 @@ If you have very fast storage and a large enough heap dump to notice the differe
 
 # Performance
 
-The library parses the `mmap`'d contents of an hprof file. This allows parsing enormous heap dumps without being constrained by the available system memory, as well as zero-copy parsing. Parsing a `Utf8` record type, for instance, results in a stack-allocated struct with an 8-byte id and a `&[u8]` slice that simply points into the mapped file contents. 
+The library parses the `mmap`'d contents of an hprof file. This allows parsing enormous heap dumps without being constrained by the available system memory, as well as mostly zero-copy parsing. Parsing a `Utf8` record type, for instance, results in a stack-allocated struct with an 8-byte id and a `&[u8]` slice that simply points into the mapped file contents. 
 
-While it would be possible (and interesting) to push the zero-copy part further by making even ids simply read from the underlying slice, eagerly parsing those ids hasn't proven to be a performance bottleneck so it hasn't been tackled yet.
+It would be interesting to push the zero-copy part further by making even ids simply read from the underlying slice, though in some cases there are tag-length-value style encodings used so some parsing does have to be done up front.
 
 Since larger heap dumps are broken up into 2GiB segments, any heap dump large enough to take a noticeable time to parse can be processed in parallel, and a handful of cores will saturate even fast NVMe storage's read throughput. The `instance-count` tool (see below), for instance, is parallelized and parses heap dumps at 2100-2200MiB/s with 4x 3.5GHz Broadwell cores on an NVMe drive rated for 600,000 IOPS random read at 4KiB (~2300MiB/s). By 6 cores, the drive is completely saturated.
 
@@ -74,7 +74,7 @@ Consider classes `Foo` and `Bar`, where `Foo` has a field `b` of type `Bar` (nev
 
 `--min-edge-count` sets the threshold for how many references there must be from a given field to another type for it to be included in the graph. Smaller numbers will show more nodes in the graph at the cost of more visual clutter.
 
-This is the output produced with `--min-edge-count 100` on the heap dump of a newly started JVM (click to see full size):
+This is the output produced with `--min-edge-count 100` on the heap dump of a newly started JVM:
 
 [![ref count with min edge 100](doc/ref-count-empty-100.svg)](doc/ref-count-empty-100.svg)
 
